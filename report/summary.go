@@ -19,6 +19,7 @@ type Summary struct {
 	SidecarXMP     int // written to XMP sidecar
 	AlreadyCorrect int
 	NoSidecar      int
+	Undated        int // media without any usable date source (left untouched)
 	Failed         int
 	JunkIgnored    int
 
@@ -86,6 +87,9 @@ func (s *Summary) Print(w io.Writer) {
 	fmt.Fprintf(w, "   XMP sidecars written:      %d\n", s.SidecarXMP)
 	fmt.Fprintf(w, "   already correct:           %d\n", s.AlreadyCorrect)
 	fmt.Fprintf(w, "   skipped without sidecar:   %d\n", s.NoSidecar)
+	if s.Undated > 0 {
+		fmt.Fprintf(w, "   undated (left untouched):  %d\n", s.Undated)
+	}
 	fmt.Fprintf(w, "   failed:                    %d\n", s.Failed)
 	if s.FSModSet > 0 || s.FSCreateSet > 0 || s.FSCreateUnsupported > 0 {
 		fmt.Fprintf(w, "   fs modification times set: %d\n", s.FSModSet)

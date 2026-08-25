@@ -1,4 +1,3 @@
-// Package commands implements the gophix subcommands.
 package commands
 
 import (
@@ -8,41 +7,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alexdachin/gophix/meta"
 	"github.com/alexdachin/gophix/report"
-)
-
-// cleanPathArg repairs path arguments mangled by Windows shell quoting.
-// A PowerShell call like:  gophix.exe fix 'C:\dir name\'
-// marshals the argument as "C:\dir name\" and the Windows C runtime parses
-// the trailing \" as an escaped quote, so the program receives
-// 'C:\dir name"'. Strip stray quotes and any resulting trailing separator,
-// then normalize.
-func cleanPathArg(p string) string {
-	p = strings.TrimSpace(p)
-	p = strings.Trim(p, `"`)
-	if p == "" {
-		return p
-	}
-	// Drop one trailing separator unless it is a filesystem/volume root.
-	if len(p) > 1 && (p[len(p)-1] == '/' || p[len(p)-1] == '\\') {
-		isRoot := strings.HasSuffix(p, ":\\") || p == "/" || p == "\\"
-		if !isRoot {
-			p = p[:len(p)-1]
-		}
-	}
-	return filepath.Clean(p)
-}
-
-const version = "1.1.0"
-
-// Process exit codes.
-const (
-	ExitOK         = 0
-	ExitErrors     = 1
-	ExitUsage      = 2
-	ExitNoExiftool = 3
 )
 
 // validLayouts lists the accepted --layout values and what they produce.
@@ -90,82 +58,147 @@ func inferDupFormat(output, explicit string) (string, error) {
 const usage = `gophix - restore Google Photos Takeout metadata into your media
 
 Usage:
+  gophix run [options] <takeout-root> <organized-destination>
+  gophix find-duplicates [options] <takeout-root>
   gophix fix [options] <takeout-media-root>
-  gophix clean-json [options] <takeout-media-root>
-  gophix organize-by-year [options] <source-path> <destination-path>
-  gophix find-duplicates [options] <takeout-media-root>
+  gophix organize-by-year [options] <source> <destination>
+  gophix clean-json [options] <takeout-root>
   gophix version | help
 
-Commands:
-  fix               Merge sidecar metadata (dates, GPS, description) into media.
-  clean-json        Delete matched & verified JSON sidecars (safe by default).
-  organize-by-year  Copy or move media into date folders by capture date.
-  find-duplicates   Report exact duplicate content (report-only, never deletes).
+The simple workflow:
+  gophix run 'Takeout' 'Organized'
+     step 1/3  deduplicate      find exact copies; removes them with --yes, reports otherwise
+     step 2/3  correct dates    photo date wins, JSON fills gaps, filename last resort
+     step 3/3  restructure      copy into Organized/YYYY/
 
 Options:
   --dry-run                       Plan only; never write, rename, move or delete.
   --verbose                       Detailed per-file output.
-  --timezone <IANA-zone|+01:00>   Timezone for local capture times (e.g. Europe/Berlin).
-                                  Recommended; without it unresolved times stay UTC with a warning.
-  --force-json-time               Overwrite valid embedded capture times with the JSON time.
-  --time-policy <policy>          preserve-existing (default) | prefer-json | json-only
-  --yes                           clean-json only: skip the confirmation prompt.
-  --move                          organize-by-year only: move instead of copy (opt-in).
-  --include-unknown-date          organize-by-year only: place undated media into Unknown/.
-  --keep-json                     organize-by-year only: also copy matched JSON sidecars.
-  --layout <layout>               organize-by-year only: folder structure under <destination-path>.
-                                  yyyy      2020/file.jpg           (default)
-                                  yyyy/mm   2020/12/file.jpg
-                                  yyyy-mm   2020-12/file.jpg
-                                  flat      file.jpg                (all in one)
-  --format <text|csv|json>        find-duplicates only: report format (default: inferred
-                                  from --output extension, else text).
-  --output <file|->               find-duplicates only: write the report to a file
-                                  instead of stdout ("-" = stdout).
-  --delete                        find-duplicates only: delete the redundant copies of each
-                                  duplicate family (never the ★ keeper). Asks for confirmation
-                                  unless --yes; --dry-run only plans. Also removes a deleted
-                                  copy's own JSON sidecar / .xmp.
-  --no-filename-fallback          Never derive capture dates from filenames.
-  --jobs <N>                      Parallel ExifTool workers (default: number of CPUs, max 8).
-  --assume-noon-for-date-only     Use 12:00:00 for date-only filename matches (default: off).
+  --timezone <IANA-zone|±HH:MM>   Optional precision for JSON/filename dates
+                                  (e.g. Europe/Berlin). Photo-embedded dates are used as-is.
+  --layout <yyyy|yyyy/mm|yyyy-mm|flat>  organize/run: folder structure (default yyyy).
+  --move                          organize: move instead of copy (opt-in).
+  --include-unknown-date          organize/run: place undated media into Unknown/.
+  --keep-json                     organize/run: also copy matched JSON sidecars.
+  --delete (+ --yes)              find-duplicates: remove surplus duplicate copies.
+  --format <text|csv|json>, --output <file|->  find-duplicates report format/destination.
+  --yes                           Skip confirmation prompts (scripts).
+  --jobs <N>                      Parallel ExifTool workers (default: CPU count, max 8).
 
 Examples:
-  gophix fix --dry-run --timezone Europe/Berlin "/data/Takeout/Google Fotos"
-  gophix fix --timezone Europe/Berlin "/data/Takeout/Google Fotos"
-  gophix organize-by-year --dry-run "/data/Takeout/Google Fotos" "/data/Organized"
-  gophix organize-by-year --layout yyyy/mm "/data/Takeout/Google Fotos" "/data/Organized"
-  gophix find-duplicates "/data/Takeout/Google Fotos"
-  gophix find-duplicates --output dupes.csv "/data/Takeout/Google Fotos"
-  gophix clean-json --yes "/data/Takeout/Google Fotos"
+  gophix run --dry-run "Takeout" "Organized"        # plan the whole pipeline
+  gophix run "Takeout" "Organized"
+  gophix fix --timezone Europe/Berlin "Takeout/Google Fotos"
 
 Always work on a copy of your Takeout export.
 `
 
-// globalOpts holds flags shared by the subcommands.
-type globalOpts struct {
-	DryRun                bool
-	Verbose               bool
-	Timezone              string
-	ForceJSON             bool
-	TimePolicy            string
-	NoFilenameFallback    bool
-	AssumeNoonForDateOnly bool
-	Jobs                  int
-}
-
-func (g *globalOpts) clock() (*meta.Clock, error) {
-	policy, err := meta.ParseTimePolicy(g.TimePolicy)
-	if err != nil {
-		return nil, err
+// Run dispatches a subcommand and returns the process exit code.
+func Run(args []string, stdout io.Writer, stderr io.Writer, stdin io.Reader) int {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, usage)
+		return ExitUsage
 	}
-	return meta.NewClock(meta.ClockConfig{
-		Policy:                policy,
-		ForceJSON:             g.ForceJSON,
-		Timezone:              g.Timezone,
-		NoFilenameFallback:    g.NoFilenameFallback,
-		AssumeNoonForDateOnly: g.AssumeNoonForDateOnly,
-	})
+	switch args[0] {
+	case "help", "-h", "--help":
+		fmt.Fprint(stdout, usage)
+		return ExitOK
+	case "version", "--version":
+		fmt.Fprintf(stdout, "gophix %s\n", version)
+		return ExitOK
+	}
+
+	cmd := args[0]
+	p, err := parseArgs(args[1:])
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n\n%s", err, usage)
+		return ExitUsage
+	}
+	if len(p.positional) == 0 {
+		fmt.Fprintf(stderr, "error: missing path argument\n\n%s", usage)
+		return ExitUsage
+	}
+
+	var zone *time.Location
+	zone, err = meta.LoadZone(p.g.Timezone)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitUsage
+	}
+
+	needsExiftool := cmd != "find-duplicates"
+	if needsExiftool {
+		if err := meta.Available(); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return ExitNoExiftool
+		}
+		meta.ConfigureJobs(p.g.Jobs)
+	}
+
+	bw := bufio.NewWriter(stdout)
+
+	var code int
+	switch cmd {
+	case "run":
+		if len(p.positional) < 2 {
+			fmt.Fprintf(stderr, "error: run needs <takeout-root> <organized-destination>\n\n%s", usage)
+			return ExitUsage
+		}
+		code = runPipeline(pipeCfg{
+			src: cleanPathArg(p.positional[0]), dst: cleanPathArg(p.positional[1]),
+			layout: p.layout, includeUnknown: p.includeUnk, keepJSON: p.keepJSON,
+			yes: p.yes, g: p.g,
+		}, zone, stdin, bw)
+	case "find-duplicates":
+		format, ferr := inferDupFormat(p.output, p.format)
+		if ferr != nil {
+			fmt.Fprintf(stderr, "error: %v\n\n%s", ferr, usage)
+			return ExitUsage
+		}
+		code = runFindDuplicates(dupCfg{
+			root: cleanPathArg(p.positional[0]), format: format, output: p.output,
+			delete: p.del, yes: p.yes, g: p.g,
+		}, stdin, bw)
+	case "fix":
+		sum := report.New(bw)
+		code = runFix(cleanPathArg(p.positional[0]), &p.g, zone, sum, bw)
+		fmt.Fprintln(bw, "")
+		sum.Print(bw)
+		if code == ExitOK && sum.HasErrors() {
+			code = ExitErrors
+		}
+	case "organize-by-year":
+		if len(p.positional) < 2 {
+			fmt.Fprintf(stderr, "error: organize-by-year needs <source-path> <destination-path>\n\n%s", usage)
+			return ExitUsage
+		}
+		sum := report.New(bw)
+		code = runOrganize(organizeCfg{
+			src: cleanPathArg(p.positional[0]), dst: cleanPathArg(p.positional[1]),
+			move: p.move, includeUnknown: p.includeUnk, keepJSON: p.keepJSON,
+			layout: p.layout, zone: zone, g: p.g,
+		}, sum, bw)
+		fmt.Fprintln(bw, "")
+		sum.Print(bw)
+		if code == ExitOK && sum.HasErrors() {
+			code = ExitErrors
+		}
+	case "clean-json":
+		sum := report.New(bw)
+		code = runCleanJSON(cleanPathArg(p.positional[0]), &p.g, zone, p.yes, stdin, bw, sum)
+		fmt.Fprintln(bw, "")
+		sum.Print(bw)
+		if code == ExitOK && sum.HasErrors() {
+			code = ExitErrors
+		}
+	default:
+		fmt.Fprintf(stderr, "error: unknown command %q\n\n%s", cmd, usage)
+		return ExitUsage
+	}
+
+	_ = bw.Flush()
+	meta.CloseAll()
+	return code
 }
 
 func isFlag(a string) bool { return strings.HasPrefix(a, "-") && a != "-" }
@@ -199,33 +232,26 @@ type parsedArgs struct {
 }
 
 func parseArgs(args []string) (*parsedArgs, error) {
-	p := &parsedArgs{g: globalOpts{TimePolicy: "preserve-existing"}}
+	p := &parsedArgs{}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case !isFlag(a):
 			p.positional = append(p.positional, a)
-			continue
 		case a == "--dry-run":
 			p.g.DryRun = true
 		case a == "--verbose" || a == "-v":
 			p.g.Verbose = true
-		case a == "--force-json-time":
-			p.g.ForceJSON = true
 		case a == "--yes":
 			p.yes = true
-		case a == "--delete":
-			p.del = true
 		case a == "--move":
 			p.move = true
+		case a == "--delete":
+			p.del = true
 		case a == "--include-unknown-date":
 			p.includeUnk = true
 		case a == "--keep-json":
 			p.keepJSON = true
-		case a == "--no-filename-fallback":
-			p.g.NoFilenameFallback = true
-		case a == "--assume-noon-for-date-only":
-			p.g.AssumeNoonForDateOnly = true
 		default:
 			if v, ok := flagValue(args, &i, "--jobs"); ok {
 				n, err := strconv.Atoi(v)
@@ -237,10 +263,6 @@ func parseArgs(args []string) (*parsedArgs, error) {
 			}
 			if v, ok := flagValue(args, &i, "--timezone"); ok {
 				p.g.Timezone = v
-				continue
-			}
-			if v, ok := flagValue(args, &i, "--time-policy"); ok {
-				p.g.TimePolicy = v
 				continue
 			}
 			if v, ok := flagValue(args, &i, "--layout"); ok {
@@ -262,107 +284,4 @@ func parseArgs(args []string) (*parsedArgs, error) {
 		}
 	}
 	return p, nil
-}
-
-// Run dispatches a subcommand and returns the process exit code.
-func Run(args []string, stdout io.Writer, stderr io.Writer, stdin io.Reader) int {
-	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
-		return ExitUsage
-	}
-
-	switch args[0] {
-	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usage)
-		return ExitOK
-	case "version", "--version":
-		fmt.Fprintf(stdout, "gophix %s\n", version)
-		return ExitOK
-	}
-
-	cmd := args[0]
-	rest := args[1:]
-
-	p, err := parseArgs(rest)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n\n%s", err, usage)
-		return ExitUsage
-	}
-	if len(p.positional) == 0 {
-		fmt.Fprintf(stderr, "error: missing path argument\n\n%s", usage)
-		return ExitUsage
-	}
-
-	clock, err := p.g.clock()
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return ExitUsage
-	}
-
-	// find-duplicates is pure filesystem work and runs without ExifTool.
-	needsExiftool := cmd != "find-duplicates"
-	if needsExiftool {
-		if err := meta.Available(); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return ExitNoExiftool
-		}
-		meta.ConfigureJobs(p.g.Jobs)
-	}
-
-	// Buffer the hot per-file output: tens of thousands of small writes would
-	// otherwise cost one syscall each. confirm() flushes before blocking on
-	// stdin; everything else is flushed once at the end.
-	bw := bufio.NewWriter(stdout)
-	sum := report.New(bw)
-
-	var code int
-	switch cmd {
-	case "fix":
-		code = runFix(cleanPathArg(p.positional[0]), &p.g, clock, sum, bw)
-	case "clean-json":
-		code = runCleanJSON(cleanPathArg(p.positional[0]), &p.g, clock, p.yes, stdin, bw, sum)
-	case "organize-by-year":
-		if len(p.positional) < 2 {
-			fmt.Fprintf(stderr, "error: organize-by-year needs <source-path> <destination-path>\n\n%s", usage)
-			return ExitUsage
-		}
-		code = runOrganize(organizeCfg{
-			src: cleanPathArg(p.positional[0]), dst: cleanPathArg(p.positional[1]),
-			move: p.move, includeUnknown: p.includeUnk, keepJSON: p.keepJSON,
-			layout: p.layout,
-			g:      p.g, clock: clock,
-		}, sum, bw)
-	case "find-duplicates":
-		format, ferr := inferDupFormat(p.output, p.format)
-		if ferr != nil {
-			fmt.Fprintf(stderr, "error: %v\n\n%s", ferr, usage)
-			return ExitUsage
-		}
-		code = runFindDuplicates(dupCfg{
-			root:   cleanPathArg(p.positional[0]),
-			format: format,
-			output: p.output,
-			delete: p.del,
-			yes:    p.yes,
-			g:      p.g,
-		}, stdin, bw)
-	default:
-		fmt.Fprintf(stderr, "error: unknown command %q\n\n%s", cmd, usage)
-		return ExitUsage
-	}
-
-	// find-duplicates renders its own summary/footer.
-	if cmd == "find-duplicates" {
-		_ = bw.Flush()
-		return code
-	}
-
-	fmt.Fprintln(bw, "")
-	sum.Print(bw)
-	if code == ExitOK && sum.HasErrors() {
-		code = ExitErrors
-	}
-	_ = bw.Flush()
-	meta.CloseAll() // shut down pooled stay_open exiftool processes
-	return code
 }

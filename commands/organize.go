@@ -1,8 +1,6 @@
 package commands
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -23,8 +21,8 @@ type organizeCfg struct {
 	includeUnknown bool
 	keepJSON       bool
 	layout         string // yyyy (default), yyyy/mm, yyyy-mm, flat
+	zone           *time.Location
 	g              globalOpts
-	clock          *meta.Clock
 }
 
 // layoutDir returns the destination directory for one media file according to
@@ -100,25 +98,16 @@ func runOrganize(cfg organizeCfg, sum *report.Summary, stdout io.Writer) int {
 		return ExitErrors
 	}
 
-	// Bulk-read embedded metadata only for files whose resolution chain can
-	// ever consult it under the active policy (see organizeNeedsMetaRead).
-	readIdx := make([]int, 0, len(jobs))
+	// One bulk metadata read per file; workers reuse it for planning.
+	paths := make([]string, len(jobs))
 	for i := range jobs {
-		if organizeNeedsMetaRead(jobs[i].sc, cfg) {
-			readIdx = append(readIdx, i)
-		}
+		paths[i] = filepath.Join(jobs[i].dc.path, jobs[i].mediaName)
 	}
-	if len(readIdx) > 0 {
-		paths := make([]string, len(readIdx))
-		for k, i := range readIdx {
-			paths[k] = filepath.Join(jobs[i].dc.path, jobs[i].mediaName)
-		}
-		infos := make([]meta.Info, len(paths))
-		fails := make([]error, len(paths))
-		bulkRead(paths, infos, fails)
-		for k, i := range readIdx {
-			jobs[i].cur, jobs[i].readErr = infos[k], fails[k]
-		}
+	infos := make([]meta.Info, len(paths))
+	fails := make([]error, len(paths))
+	bulkRead(paths, infos, fails)
+	for i := range jobs {
+		jobs[i].cur, jobs[i].readErr = infos[i], fails[i]
 	}
 
 	runPool(len(jobs),
@@ -131,58 +120,25 @@ func runOrganize(cfg organizeCfg, sum *report.Summary, stdout io.Writer) int {
 	return ExitOK
 }
 
-// organizeNeedsMetaRead reports whether the capture-date resolution chain for
-// this file can ever consult embedded metadata under cfg's policy. When it
-// cannot, the per-file ExifTool read is skipped entirely:
-//
-//   - json-only: JSON time or mtime fallback - embedded never consulted.
-//   - prefer-json / --force-json-time with a JSON timestamp: JSON wins
-//     outright (ResolveTaken returns immediately without looking at embedded).
-func organizeNeedsMetaRead(sc *takeout.Sidecar, cfg organizeCfg) bool {
-	switch {
-	case cfg.clock.Policy == meta.PolicyJSONOnly:
-		return false
-	case sc != nil && (sc.PhotoTaken != nil || sc.Creation != nil) &&
-		(cfg.g.ForceJSON || cfg.clock.Policy == meta.PolicyPreferJSON):
-		return false
-	default:
-		return true
-	}
-}
-
-func buildOrgResolved(mediaPath string, info meta.Info, sc *takeout.Sidecar, cfg organizeCfg) (*meta.Resolved, string) {
+// buildOrgResolved resolves the capture date under the v2 rule:
+// embedded -> JSON -> filename. Returns nil when nothing works.
+func buildOrgResolved(mediaPath string, info meta.Info, sc *takeout.Sidecar, cfg organizeCfg) (*meta.DateResult, string) {
 	var taken *int64
-	label := ""
 	if sc != nil {
-		switch {
-		case sc.PhotoTaken != nil:
-			taken, label = sc.PhotoTaken, meta.SrcJsonPhotoTaken
-		case sc.Creation != nil:
-			taken, label = sc.Creation, meta.SrcJsonCreation
-		}
+		taken = sc.TakenUnix()
 	}
-	stat, _ := os.Stat(mediaPath)
-	var mtime = time.Unix(0, 0)
-	if stat != nil {
-		mtime = stat.ModTime()
+	var fname *meta.FileNameDate
+	if f, err := meta.ParseFileName(mediaPath); err == nil {
+		fname = f
 	}
-	emb := meta.EmbeddedFromInfo(info) // nil-safe: empty candidates when info is nil
-
-	fname := (*meta.FileNameDate)(nil)
-	if cfg.clock.UseFilename {
-		if f, ferr := meta.ParseFileName(mediaPath); ferr == nil {
-			fname = f
-		}
-	}
-	// json-only policy: no JSON timestamp means genuinely unknown date here.
-	if cfg.g.TimePolicy == "json-only" && taken == nil {
+	date, ok := meta.ResolveDate(info, taken, fname, cfg.zone)
+	if !ok {
 		return nil, ""
 	}
-	resolved := cfg.clock.ResolveTaken(taken, label, emb, fname, mtime)
-	return resolved, resolvedSource(resolved)
+	return date, date.Source
 }
 
-func resolvedSource(r *meta.Resolved) string {
+func resolvedSource(r *meta.DateResult) string {
 	if r == nil {
 		return "unknown"
 	}
@@ -198,8 +154,7 @@ func processOrgItem(job orgJob, cfg organizeCfg) orgResult {
 
 	resolved, srcLabel := buildOrgResolved(mediaPath, job.cur, job.sc, cfg)
 	if job.readErr != nil {
-		// Preserve the historical behavior of a failed metadata read:
-		// the file counts as having no usable capture date.
+		// A failed metadata read counts as no usable capture date.
 		resolved, srcLabel = nil, ""
 	}
 
@@ -229,7 +184,7 @@ func processOrgItem(job orgJob, cfg organizeCfg) orgResult {
 		}
 		dir = filepath.Join(cfg.dst, "Unknown")
 	default:
-		dir = layoutDir(cfg.layout, cfg.dst, resolved.Local)
+		dir = layoutDir(cfg.layout, cfg.dst, resolved.Wall)
 	}
 	res.source = srcLabel
 
@@ -452,7 +407,7 @@ type orgItem struct {
 	mediaPath string
 	matchVal  takeout.Match
 	xmpPath   string
-	resolved  *meta.Resolved
+	resolved  *meta.DateResult
 }
 
 func matchedJSONPath(item *orgItem) string {
@@ -460,29 +415,6 @@ func matchedJSONPath(item *orgItem) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(item.mediaPath), item.matchVal.FileName)
-}
-
-const hashLen = 6
-
-func shortHash(s string) string {
-	if len(s) <= hashLen {
-		return s
-	}
-	return s[:hashLen]
-}
-
-// hashFile streams the SHA-256 of a file.
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // sameContent compares two files by size first, then by hash.
@@ -498,37 +430,4 @@ func sameContent(a, b string) (bool, string) {
 		return false, ha
 	}
 	return ha == hb, hb
-}
-
-// copyVerified copies src to dst and verifies the written bytes via SHA-256.
-func copyVerified(src, dst string) (string, error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return "", fmt.Errorf("cannot open %s: %w", src, err)
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return "", fmt.Errorf("cannot create %s: %w", dst, err)
-	}
-
-	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(out, h), in); err != nil {
-		out.Close()
-		return "", fmt.Errorf("cannot copy %s: %w", src, err)
-	}
-	if err := out.Close(); err != nil {
-		return "", fmt.Errorf("cannot write %s: %w", dst, err)
-	}
-
-	written, err := hashFile(dst)
-	if err != nil {
-		return hex.EncodeToString(h.Sum(nil)), fmt.Errorf("cannot verify %s: %w", dst, err)
-	}
-	want := hex.EncodeToString(h.Sum(nil))
-	if written != want {
-		return want, fmt.Errorf("copy verification failed for %s (hash mismatch)", dst)
-	}
-	return want, nil
 }

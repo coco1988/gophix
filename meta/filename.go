@@ -5,7 +5,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
+)
+
+// Sanity bounds shared by filename and metadata date validation.
+const (
+	minSaneYear = 1900
+	maxSaneYear = 2100
 )
 
 // FileNameDate is a validated capture date parsed from a media filename.

@@ -1,11 +1,11 @@
-// gophix restores Google Photos Takeout metadata (capture dates, GPS,
-// description) into media files and organizes them by year.
 package main
 
 import (
 	"os"
 
-	_ "time/tzdata" // embed timezone database so --timezone works everywhere
+	// Embed the IANA timezone database so --timezone Europe/Berlin works on
+	// Windows and in any scratch container without OS tz packages.
+	_ "time/tzdata"
 
 	"github.com/alexdachin/gophix/commands"
 )

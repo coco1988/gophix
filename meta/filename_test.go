@@ -133,87 +133,23 @@ func TestFilename_ExtensionIgnored(t *testing.T) {
 	}
 }
 
-func TestClock_FilenameResolution(t *testing.T) {
-	// T6/F-precedence: JSON overrides filename.
-	taken := int64(1607262273) // 2020-12-06T13:24:33Z
-	fname := &FileNameDate{Wall: time.Date(2019, 1, 1, 10, 0, 0, 0, time.UTC)}
-	clock, _ := NewClock(ClockConfig{Policy: PolicyPreferJSON})
-	r := clock.ResolveTaken(&taken, SrcJsonPhotoTaken, Embedded{}, fname, time.Time{})
-	if r.Source != SrcJsonPhotoTaken {
-		t.Fatalf("json must win: %+v", r)
-	}
-
-	// Default policy: valid embedded DateTimeOriginal with offset wins over filename.
-	clock2, _ := NewClock(ClockConfig{Policy: PolicyPreserveExisting})
-	emb := Embedded{PhotoDO: "2019:05:05 10:00:00", PhotoDOOff: "+02:00"}
-	r2 := clock2.ResolveTaken(nil, "", emb, fname, time.Time{})
-	if r2.Source != SrcEmbDO {
-		t.Fatalf("embedded+offset must win: %+v", r2)
-	}
-
-	// Filename used when nothing else exists; with explicit zone it gains an offset.
-	clock3, _ := NewClock(ClockConfig{Policy: PolicyPreserveExisting, Timezone: "Europe/Berlin"})
-	r3 := clock3.ResolveTaken(nil, "", Embedded{}, fname, time.Unix(1000000, 0))
-	if r3.Source != SrcFileNameDT {
-		t.Fatalf("filename fallback expected: %+v", r3)
-	}
-	_ = clock
-
-	// --no-filename-fallback skips the filename source entirely.
-	clock4, _ := NewClock(ClockConfig{Policy: PolicyPreserveExisting, NoFilenameFallback: true, Timezone: "Europe/Berlin"})
-	embNil := Embedded{}
-	r5 := clock4.ResolveTaken(nil, "", embNil, fname, time.Unix(1600000000, 0))
-	if r5.Source != SrcFSMtime {
-		t.Fatalf("filename fallback must be disabled: %+v", r5)
-	}
-}
-
-func TestClock_FileNameDateTimeWithZone(t *testing.T) {
-	emb := Embedded{}
+func TestResolveDate_FilenameWithAndWithoutZone(t *testing.T) {
 	fname := &FileNameDate{Wall: time.Date(2020, 12, 6, 14, 24, 33, 0, time.UTC)}
 
-	// Without any other source and non-json-only policy the filename applies.
-	clock2, _ := NewClock(ClockConfig{Policy: PolicyPreserveExisting, Timezone: "Europe/Berlin"})
-	r := clock2.ResolveTaken(nil, "", emb, fname, time.Time{})
-	if r.Source != SrcFileNameDT {
-		t.Fatalf("%+v", r)
+	zone, _ := LoadZone("Europe/Berlin")
+	r, ok := ResolveDate(Info{}, nil, fname, zone)
+	if !ok || r.Source != SrcFilename || r.DateOnly {
+		t.Fatalf("%+v ok=%v", r, ok)
 	}
-	if !r.HasAbsolute || r.Offset == nil || *r.Offset != "+01:00" {
+	if r.Offset == nil || *r.Offset != "+01:00" {
 		t.Fatalf("zone must attach: %+v", r)
 	}
-	if got := Exif(r.Local); got != "2020:12:06 14:24:33" {
+	if got := Exif(r.Wall); got != "2020:12:06 14:24:33" {
 		t.Fatalf("clock digits changed: %s", got)
 	}
 
-	// Without zone: digits kept, no offset claim, warning present.
-	clock3, _ := NewClock(ClockConfig{Policy: PolicyPreserveExisting})
-	r3 := clock3.ResolveTaken(nil, "", emb, fname, time.Time{})
-	if r3.Offset != nil || len(r3.Warnings) == 0 {
-		t.Fatalf("naive filename time must warn: %+v", r3)
-	}
-}
-
-func TestClock_DateOnlyOrganizeYearNoInventedTime(t *testing.T) {
-	clock, _ := NewClock(ClockConfig{Policy: PolicyPreserveExisting})
-	fname := &FileNameDate{Wall: time.Date(2019, 3, 1, 0, 0, 0, 0, time.UTC), DateOnly: true, Pattern: patDateDash}
-	r := clock.ResolveTaken(nil, "", Embedded{}, fname, time.Time{})
-	if !r.DateOnly || r.Source != SrcFileNameDO {
-		t.Fatalf("%+v", r)
-	}
-	if r.Local.Year() != 2019 || r.Local.Month() != time.March {
-		t.Fatalf("year resolution: %+v", r.Local)
-	}
-	if r.HasAbsolute {
-		t.Fatal("date-only without assume-noon has no trustworthy absolute instant for GPS")
-	}
-
-	// assume-noon promotes it into a writable full time.
-	clock2, _ := NewClock(ClockConfig{Policy: PolicyPreserveExisting, AssumeNoonForDateOnly: true, Timezone: "Europe/Berlin"})
-	r2 := clock2.ResolveTaken(nil, "", Embedded{}, fname, time.Time{})
-	if r2.DateOnly || r2.Offset == nil {
-		t.Fatalf("assume-noon: %+v", r2)
-	}
-	if got := Exif(r2.Local); got != "2019:03:01 12:00:00" {
-		t.Fatalf("noon: %s", got)
+	r3, ok := ResolveDate(Info{}, nil, fname, nil)
+	if !ok || r3.Offset != nil || r3.DateOnly {
+		t.Fatalf("naive filename date keeps digits without offset claim: %+v", r3)
 	}
 }

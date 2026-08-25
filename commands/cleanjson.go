@@ -1,13 +1,12 @@
 package commands
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
+	"time"
 
 	"github.com/alexdachin/gophix/meta"
 	"github.com/alexdachin/gophix/report"
@@ -17,7 +16,7 @@ import (
 // runCleanJSON deletes only sidecars matched to existing media whose metadata
 // verifies fully correct. Stateless: matching and verification run live at
 // deletion time, so behavior stays safe across separate program runs.
-func runCleanJSON(root string, g *globalOpts, clock *meta.Clock, yes bool, stdin io.Reader, stdout io.Writer, sum *report.Summary) int {
+func runCleanJSON(root string, g *globalOpts, zone *time.Location, yes bool, stdin io.Reader, stdout io.Writer, sum *report.Summary) int {
 	if _, err := os.Stat(root); err != nil {
 		fmt.Fprintf(stdout, "error: cannot access %s: %v\n", root, err)
 		return ExitErrors
@@ -42,25 +41,8 @@ func runCleanJSON(root string, g *globalOpts, clock *meta.Clock, yes bool, stdin
 			if !m.Found() {
 				continue
 			}
-			sidecarPath := filepath.Join(dc.path, m.FileName)
-			mediaPath := filepath.Join(dc.path, mediaName)
-
-			data, err := os.ReadFile(sidecarPath)
-			if err != nil {
-				sum.JSONKeptInvalid++
-				if g.Verbose {
-					fmt.Fprintf(stdout, "   keeping %s (unreadable: %v)\n", sidecarPath, err)
-				}
-				continue
-			}
-			if _, perr := takeout.Parse(data); perr != nil {
-				sum.JSONKeptInvalid++
-				if g.Verbose {
-					fmt.Fprintf(stdout, "   keeping %s (invalid JSON: %v)\n", sidecarPath, perr)
-				}
-				continue
-			}
-			candidates = append(candidates, pair{mediaPath, sidecarPath})
+			candidates = append(candidates,
+				pair{filepath.Join(dc.path, mediaName), filepath.Join(dc.path, m.FileName)})
 		}
 
 		for _, j := range dc.matcher.Unclaimed() {
@@ -87,7 +69,7 @@ func runCleanJSON(root string, g *globalOpts, clock *meta.Clock, yes bool, stdin
 			msg string
 		} {
 			p := candidates[i]
-			msg := verifySidecarDeletable(p.mediaPath, p.sidecarPath, clock)
+			msg := verifySidecarDeletable(p.mediaPath, p.sidecarPath, zone)
 			return struct {
 				p   pair
 				ok  bool
@@ -120,16 +102,14 @@ func runCleanJSON(root string, g *globalOpts, clock *meta.Clock, yes bool, stdin
 	for _, d := range deletable {
 		fmt.Fprintf(stdout, "   %s  (media: %s)\n", d.sidecarPath, filepath.Base(d.mediaPath))
 	}
-
 	if g.DryRun {
 		fmt.Fprintf(stdout, "\n[dry-run] would delete %d file(s)\n", len(deletable))
 		return ExitOK
 	}
-
 	if !yes {
 		ok, confirmErr := confirm(stdin, stdout, fmt.Sprintf("delete these %d files", len(deletable)))
 		if confirmErr != nil {
-			fmt.Fprintf(stdout, "error: %v (re-run with --yes for non-interactive use)\n", confirmErr)
+			fmt.Fprintf(stdout, "error: %v\n", confirmErr)
 			return ExitErrors
 		}
 		if !ok {
@@ -152,9 +132,8 @@ func runCleanJSON(root string, g *globalOpts, clock *meta.Clock, yes bool, stdin
 }
 
 // verifySidecarDeletable checks that the paired media carries fully correct
-// metadata (dates, GPS, description and FileModifyDate). Returns "" when the
-// sidecar may be deleted, otherwise the reason why it is kept.
-func verifySidecarDeletable(mediaPath, sidecarPath string, clock *meta.Clock) string {
+// metadata under the v2 rules. Returns "" when the sidecar may be deleted.
+func verifySidecarDeletable(mediaPath, sidecarPath string, zone *time.Location) string {
 	data, err := os.ReadFile(sidecarPath)
 	if err != nil {
 		return fmt.Sprintf("unreadable: %v", err)
@@ -167,8 +146,11 @@ func verifySidecarDeletable(mediaPath, sidecarPath string, clock *meta.Clock) st
 	if err != nil {
 		return fmt.Sprintf("media unreadable: %v", err)
 	}
-	plan, err := meta.BuildPlan(mediaPath, info, sc, clock, meta.Options{})
+	plan, err := meta.BuildPlan(mediaPath, info, sc, zone)
 	if err != nil {
+		if _, undated := err.(*meta.UndatableError); undated {
+			return "media has no capture date - run fix first"
+		}
 		return fmt.Sprintf("cannot plan: %v", err)
 	}
 	if !plan.MetaSatisfied(info) {
@@ -178,28 +160,4 @@ func verifySidecarDeletable(mediaPath, sidecarPath string, clock *meta.Clock) st
 		return "filesystem timestamp not synchronized yet - run fix first"
 	}
 	return ""
-}
-
-// confirm asks the user to approve an action. It refuses cleanly (with
-// actionable guidance) when stdin cannot provide an answer — e.g. inside
-// PowerShell ISE, VS Code debug consoles, or any wrapper that closes stdin.
-func confirm(stdin io.Reader, stdout io.Writer, action string) (bool, error) {
-	if stdin == os.Stdin {
-		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
-			return false, fmt.Errorf(
-				"stdin is not interactive (no terminal attached); re-run with --yes to skip the confirmation")
-		}
-	}
-	if f, ok := stdout.(interface{ Flush() error }); ok {
-		_ = f.Flush() // make buffered prompts visible before blocking on stdin
-	}
-	r := bufio.NewReader(stdin)
-	fmt.Fprintf(stdout, "Really %s? [y/N] ", action)
-	line, err := r.ReadString('\n')
-	if err != nil && line == "" {
-		return false, fmt.Errorf(
-			"no interactive confirmation possible (%v); re-run with --yes to skip the prompt", err)
-	}
-	ans := strings.ToLower(strings.TrimSpace(line))
-	return ans == "y" || ans == "yes", nil
 }
