@@ -84,11 +84,21 @@ exiftool -time:all -gps:all "Takeout-work/Google Fotos/Fotos von 2022/IMG_xxxx.j
 gophix organize-by-year "Takeout-work" "Organized"
 ```
 
-Copies (never moves by default) every dated photo/video into `Organized/YYYY/`, e.g.
-`Organized/2022/IMG_20220814_153000.jpg`. Sources stay untouched, nothing is ever overwritten;
-name collisions get deterministic suffixed names shared by media + sidecars.
-Progress is visible throughout: scanned directories and a `⏳ processed N / M files…`
-counter while copying.
+Copies every dated photo/video into `Organized/YYYY/`, e.g.
+`Organized/2022/IMG_20220814_153000.jpg`. Nothing is ever overwritten; name collisions get
+deterministic suffixed names shared by media + sidecars. Progress is visible throughout:
+scanned directories and a `⏳ processed N / M files…` counter while copying.
+
+**Copy vs. move:**
+
+| | `copy` *(default)* | `--move` |
+|---|---|---|
+| Sources | stay untouched | removed after verified placement |
+| Same drive | byte-copy; target dates restored to the capture date | **pure rename — instant, all Explorer dates preserved natively** |
+| Different drives | byte-copy with date restoration | copy + delete, dates restored |
+
+Recommended once you trust the run: same-drive `--move` — nothing is duplicated, and the
+Explorer dates repaired in step 2 survive untouched.
 
 Variants:
 

@@ -510,3 +510,16 @@ func (p *Plan) writeXMPSidecar(opts Options) (bool, error) {
 	}
 	return true, nil
 }
+
+// SyncFileDates writes FileModifyDate and FileCreateDate in one batched
+// ExifTool call (used by organize-by-year so copied files keep the capture
+// filesystem dates). FileCreateDate is unsupported on some systems; callers
+// treat errors as best-effort.
+func SyncFileDates(path string, t time.Time) error {
+	ts := FileTS(t)
+	// double -q: FileCreateDate is unsupported on Linux and emits a
+	// Windows/Mac-only warning even under single quiet mode.
+	_, err := Exec([]string{"-m", "-q", "-q", "-overwrite_original",
+		"-FileModifyDate=" + ts, "-FileCreateDate=" + ts, path})
+	return err
+}

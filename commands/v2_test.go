@@ -1,10 +1,13 @@
 package commands
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 const tsRome2022 = "1660486200" // 2022-08-14T14:10:00Z
@@ -376,5 +379,110 @@ func TestV2_FailedQuarantineDryRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(q)); !os.IsNotExist(err) {
 		t.Fatal("dry-run must not create the error folder")
+	}
+}
+
+// --- filesystem-date preservation through organizing -------------------------
+
+func backdate(t *testing.T, p string, when time.Time) {
+	t.Helper()
+	if err := os.Chtimes(p, when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// --move relocates via hard link on the same drive: every timestamp must
+// survive natively (this is the regression the user hit with copy-style moves).
+func TestV2_MovePreservesBackdatedMtime(t *testing.T) {
+	hasExiftool(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "k.jpg")
+	v2writeJPEG(t, p)
+	v2sidecar(t, dir, "k.jpg", tsRome2022)
+
+	old := time.Date(2015, 5, 17, 13, 4, 0, 0, time.UTC)
+	backdate(t, p, old)
+
+	dst := filepath.Join(t.TempDir(), "out")
+	code, out := run(t, "", "organize-by-year", "--move", "--layout", "flat",
+		"--timezone", "Europe/Berlin", dir, dst)
+	requireOK(t, out, code)
+
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("source should be gone after move\noutput:\n%s", out)
+	}
+	fi, err := os.Stat(filepath.Join(dst, "k.jpg"))
+	if err != nil {
+		t.Fatalf("target missing: %v\noutput:\n%s", err, out)
+	}
+	if !fi.ModTime().Equal(old) {
+		t.Fatalf("move must preserve mtime: got %v want %v", fi.ModTime(), old)
+	}
+}
+
+// Default copy mode heals the fresh copy's dates from the resolved capture.
+func TestV2_CopyHealsBackdatedMtime(t *testing.T) {
+	hasExiftool(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "l.jpg")
+	v2writeJPEG(t, p)
+	v2sidecar(t, dir, "l.jpg", tsRome2022)
+
+	old := time.Date(2018, 3, 3, 9, 45, 0, 0, time.UTC)
+	backdate(t, p, old)
+
+	dst := filepath.Join(t.TempDir(), "out")
+	code, out := run(t, "", "organize-by-year", "--layout", "flat",
+		"--timezone", "Europe/Berlin", dir, dst)
+	requireOK(t, out, code)
+
+	if _, err := os.Stat(p); err != nil {
+		t.Fatal("copy default keeps sources")
+	}
+	fi, err := os.Stat(filepath.Join(dst, "l.jpg"))
+	if err != nil {
+		t.Fatalf("target missing: %v", err)
+	}
+	// Healed to the RESOLVED CAPTURE date (Berlin-local), not to the source's
+	// arbitrary mtime: Explorer must show when the photo was taken.
+	want := time.Date(2022, 8, 14, 16, 10, 0, 0, time.FixedZone("CET", 2*3600))
+	if !fi.ModTime().Equal(want) {
+		t.Fatalf("copied file must carry capture mtime: got %v want %v", fi.ModTime(), want)
+	}
+}
+
+// When hard-linking is impossible (simulated cross-device), --move falls back
+// to verified copy + delete and still heals the timestamps.
+func TestV2_MoveCrossDeviceFallback(t *testing.T) {
+	hasExiftool(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "m.jpg")
+	v2writeJPEG(t, p)
+	v2sidecar(t, dir, "m.jpg", tsRome2022)
+
+	old := time.Date(2012, 12, 12, 12, 12, 0, 0, time.UTC)
+	backdate(t, p, old)
+
+	origLink := linkFunc
+	linkFunc = func(src, dst string) error {
+		return &fs.PathError{Op: "link", Path: dst, Err: syscall.EXDEV}
+	}
+	defer func() { linkFunc = origLink }()
+
+	dst := filepath.Join(t.TempDir(), "out")
+	code, out := run(t, "", "organize-by-year", "--move", "--layout", "flat",
+		"--timezone", "Europe/Berlin", dir, dst)
+	requireOK(t, out, code)
+
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("fallback move must remove the source after verified placement")
+	}
+	fi, err := os.Stat(filepath.Join(dst, "m.jpg"))
+	if err != nil {
+		t.Fatalf("target missing: %v", err)
+	}
+	want := time.Date(2022, 8, 14, 16, 10, 0, 0, time.FixedZone("CET", 2*3600))
+	if !fi.ModTime().Equal(want) {
+		t.Fatalf("cross-device move must heal to capture mtime: got %v want %v", fi.ModTime(), want)
 	}
 }

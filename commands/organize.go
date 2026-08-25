@@ -159,6 +159,9 @@ func resolvedSource(r *meta.DateResult) string {
 	return r.Source
 }
 
+// linkFunc is indirected for tests (simulating cross-device failures).
+var linkFunc = os.Link
+
 // processOrgItem places one media file (plus sidecars) under its year folder.
 func processOrgItem(job orgJob, cfg organizeCfg) orgResult {
 	res := orgResult{}
@@ -212,6 +215,9 @@ func processOrgItem(job orgJob, cfg organizeCfg) orgResult {
 	if _, err := os.Stat(target); err == nil {
 		same, _ := sameContent(item.mediaPath, target)
 		if same {
+			for _, n := range healTimestamps(target, resolved, cfg) {
+				res.vlines = append(res.vlines, n)
+			}
 			res.skippedExisting++
 			if cfg.g.Verbose {
 				res.vlines = append(res.vlines,
@@ -268,14 +274,38 @@ func processOrgItem(job orgJob, cfg organizeCfg) orgResult {
 	// On a lost creation race we re-classify against the real file instead
 	// of failing - and never delete a file we do not own.
 	copied := false
+	placedByLink := false
 	for attempt := 0; attempt < 128; attempt++ {
-		if _, err := copyVerified(item.mediaPath, target); err != nil {
+		var perr error
+		usedCopy := false
+		if cfg.move {
+			// Hard-link first: atomic, never overwrites, keeps every
+			// timestamp natively (same volume). Cross-device or other
+			// failures fall through to the verified byte-copy.
+			if lerr := linkFunc(item.mediaPath, target); lerr == nil {
+				os.Remove(item.mediaPath) // drop the duplicate directory entry
+				copied, placedByLink = true, true
+				break
+			} else if errors.Is(lerr, fs.ErrExist) {
+				perr = lerr // another worker / existing target: classify below
+			} else {
+				_, perr = copyVerified(item.mediaPath, target)
+				usedCopy = true
+			}
+		} else {
+			_, perr = copyVerified(item.mediaPath, target)
+			usedCopy = true
+		}
+
+		if perr != nil {
 			// Note: os.IsExist cannot see through %w-wrapped errors; use
 			// errors.Is against fs.ErrExist.
-			if !errors.Is(err, fs.ErrExist) {
-				// We created this (partial) file ourselves; clean it up.
-				os.Remove(target)
-				res.errs = append(res.errs, err.Error())
+			if !errors.Is(perr, fs.ErrExist) {
+				if usedCopy {
+					// We created this (partial) file ourselves; clean it up.
+					os.Remove(target)
+				}
+				res.errs = append(res.errs, perr.Error())
 				res.failed++
 				return res
 			}
@@ -308,7 +338,16 @@ func processOrgItem(job orgJob, cfg organizeCfg) orgResult {
 		res.failed++
 		return res
 	}
+	if placedByLink {
+		// Native hard-link move: timestamps untouched, nothing to heal.
+		res.copied-- // will be counted as moved below
+	}
 	res.copied++
+	if !placedByLink {
+		for _, n := range healTimestamps(target, resolved, cfg) {
+			res.vlines = append(res.vlines, n)
+		}
+	}
 
 	sidecarCopies := 0
 	if item.xmpPath != "" {
@@ -344,7 +383,32 @@ func processOrgItem(job orgJob, cfg organizeCfg) orgResult {
 		}
 	}
 
-	if cfg.move {
+	if cfg.move && placedByLink {
+		// Media was relocated via hard link above; bring the sidecars along
+		// the same way so nothing is left behind in the source tree.
+		if item.xmpPath != "" {
+			xmpTarget := filepath.Join(dir, base+".xmp")
+			if linkRelocate(item.xmpPath, xmpTarget) {
+				sidecarCopies++
+			}
+		}
+		if srcJSON != "" {
+			suffix := strings.TrimPrefix(filepath.Base(srcJSON), filepath.Base(item.mediaPath))
+			if suffix == "" || suffix == filepath.Base(srcJSON) {
+				suffix = filepath.Ext(srcJSON)
+			}
+			jsonTarget := filepath.Join(dir, base+suffix)
+			if linkRelocate(srcJSON, jsonTarget) {
+				sidecarCopies++
+			}
+		}
+		res.moved++
+		res.copied--
+		if cfg.g.Verbose {
+			res.vlines = append(res.vlines,
+				fmt.Sprintf("➡️  moved %s -> %s", filepath.Base(item.mediaPath), target))
+		}
+	} else if cfg.move {
 		removeOK := true
 		for _, p := range []string{item.mediaPath, item.xmpPath} {
 			if p == "" {
@@ -444,4 +508,39 @@ func sameContent(a, b string) (bool, string) {
 		return false, ha
 	}
 	return ha == hb, hb
+}
+
+// linkRelocate relocates src to dst via hard link (timestamp-preserving,
+// same-volume). Falls back to a verified copy across devices. Existing
+// destinations are left alone (reported as skipped by the caller's context).
+func linkRelocate(src, dst string) bool {
+	if err := linkFunc(src, dst); err == nil {
+		os.Remove(src)
+		return true
+	} else if errors.Is(err, fs.ErrExist) {
+		return false
+	}
+	if _, cerr := copyVerified(src, dst); cerr != nil {
+		os.Remove(dst)
+		return false
+	}
+	os.Remove(src)
+	return true
+}
+
+// healTimestamps restores capture-based filesystem dates on organized copies
+// so Explorer/gallery sorting survives the restructure step. Verbose notes
+// are returned for the collector.
+func healTimestamps(target string, resolved *meta.DateResult, cfg organizeCfg) []string {
+	if resolved == nil || resolved.DateOnly || cfg.g.DryRun {
+		return nil
+	}
+	var notes []string
+	if err := os.Chtimes(target, resolved.FSTime, resolved.FSTime); err != nil && cfg.g.Verbose {
+		notes = append(notes, fmt.Sprintf("mtime restore failed for %s: %v", filepath.Base(target), err))
+	}
+	if err := meta.SyncFileDates(target, resolved.FSTime); err != nil && cfg.g.Verbose {
+		notes = append(notes, fmt.Sprintf("partial filesystem date sync for %s: %v", filepath.Base(target), err))
+	}
+	return notes
 }
