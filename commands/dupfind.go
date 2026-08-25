@@ -10,6 +10,8 @@ import (
 	"sort"
 	"time"
 
+	"sync"
+
 	"github.com/alexdachin/gophix/takeout"
 )
 
@@ -115,9 +117,26 @@ func runFindDuplicates(cfg dupCfg, stdin io.Reader, stdout io.Writer) int {
 
 	digests := make([]string, len(survivors))
 	hashFails := make([]error, len(survivors))
+
+	// Hashing reads every candidate byte-for-byte - on large archives this is
+	// the slow part. Show it, so silence is never mistaken for a hang.
+	if len(survivors) > 0 {
+		fmt.Fprintf(stdout, "🔍 hashing %d of %d files (unique sizes skipped)…\n", len(survivors), len(files))
+		flushIfBuffered(stdout)
+	}
+	var hashedCount int64
+	var progressMu sync.Mutex
 	runPool(len(survivors),
 		func(i int) struct{} {
 			d, err := hashFile(files[survivors[i]].path)
+			progressMu.Lock()
+			hashedCount++
+			done := hashedCount
+			progressMu.Unlock()
+			if cfg.g.Verbose && done%500 == 0 {
+				fmt.Fprintf(stdout, "   … %d/%d hashed\n", done, len(survivors))
+				flushIfBuffered(stdout)
+			}
 			if err != nil {
 				hashFails[i] = err
 				return struct{}{}
