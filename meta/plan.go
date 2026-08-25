@@ -114,7 +114,9 @@ func BuildPlan(mediaPath string, info Info, sc *takeout.Sidecar, zone *time.Loca
 
 func (p *Plan) buildArgs() {
 	r := p.Date
-	a := []string{"-m", "-overwrite_original"}
+	// -q keeps camera-specific noise (e.g. "Duplicate MakerNoteUnknown tag")
+	// off the terminal; genuine errors still surface and fail the run.
+	a := []string{"-m", "-q", "-overwrite_original"}
 
 	full := !r.DateOnly
 	switch {
@@ -446,7 +448,7 @@ func (p *Plan) applyFS(opts Options, mainWriteRan bool) FSResult {
 	}
 	if mainWriteRan && p.fsModInMain {
 		res.ModSet = true
-	} else if _, err := Exec([]string{"-m", "-overwrite_original",
+	} else if _, err := Exec([]string{"-m", "-q", "-overwrite_original",
 		"-FileModifyDate=" + p.fsWant, p.MediaPath}); err == nil {
 		res.ModSet = true
 	} else if opts.Verbose {
@@ -456,7 +458,7 @@ func (p *Plan) applyFS(opts Options, mainWriteRan bool) FSResult {
 		res.CreateState = "unsupported"
 		return res
 	}
-	if _, err := Exec([]string{"-m", "-overwrite_original",
+	if _, err := Exec([]string{"-m", "-q", "-overwrite_original",
 		"-FileCreateDate=" + p.fsWant, p.MediaPath}); err != nil {
 		res.CreateState = "unsupported"
 	} else {
@@ -469,12 +471,12 @@ func (p *Plan) applyFS(opts Options, mainWriteRan bool) FSResult {
 func (p *Plan) writeXMPSidecar(opts Options) (bool, error) {
 	xmp := p.MediaPath + ".xmp"
 	if _, err := os.Stat(xmp); os.IsNotExist(err) {
-		args := append([]string{"-m", "-o", xmp}, p.xmpArgs...)
+		args := append([]string{"-m", "-q", "-o", xmp}, p.xmpArgs...)
 		if out, err := Exec(args); err != nil {
 			return false, fmt.Errorf("cannot create XMP sidecar %s: %v\noutput: %s", xmp, err, string(out))
 		}
 	} else {
-		args := append([]string{"-m", "-overwrite_original"}, p.xmpArgs...)
+		args := append([]string{"-m", "-q", "-overwrite_original"}, p.xmpArgs...)
 		args = append(args, xmp)
 		if out, err := Exec(args); err != nil {
 			return false, fmt.Errorf("cannot update XMP sidecar %s: %v\noutput: %s", xmp, err, string(out))

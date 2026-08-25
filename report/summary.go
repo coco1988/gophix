@@ -87,7 +87,7 @@ func (s *Summary) Print(w io.Writer) {
 	fmt.Fprintf(w, "   updated directly:          %d\n", s.Updated)
 	fmt.Fprintf(w, "   XMP sidecars written:      %d\n", s.SidecarXMP)
 	fmt.Fprintf(w, "   already correct:           %d\n", s.AlreadyCorrect)
-	fmt.Fprintf(w, "   skipped without sidecar:   %d\n", s.NoSidecar)
+	fmt.Fprintf(w, "   without JSON sidecar:      %d\n", s.NoSidecar)
 	if s.Undated > 0 {
 		fmt.Fprintf(w, "   undated (left untouched):  %d\n", s.Undated)
 	}
