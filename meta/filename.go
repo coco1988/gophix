@@ -173,9 +173,16 @@ func addDateOnly(dates *[]dateOnlyMatch, d8, pattern string) {
 }
 
 // fullTailRe builds a matcher for "<date>_<6 digits>" occurrences.
-var fullTailCache = map[string]*regexp.Regexp{}
+// Worker goroutines call ParseFileName concurrently - the cache needs the
+// mutex (unsynchronized writes here crashed with a runtime fatal).
+var (
+	fullTailMu    sync.Mutex
+	fullTailCache = map[string]*regexp.Regexp{}
+)
 
 func fullTailRe(date string) *regexp.Regexp {
+	fullTailMu.Lock()
+	defer fullTailMu.Unlock()
 	if re, ok := fullTailCache[date]; ok {
 		return re
 	}

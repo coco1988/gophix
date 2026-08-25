@@ -139,6 +139,9 @@ func runFix(root string, g *globalOpts, clock *meta.Clock, sum *report.Summary, 
 	err := walkDirs(root, func(dc *dirContext) error {
 		sum.DirsScanned++
 		fmt.Fprintf(stdout, "📓 processing %s\n", dc.path)
+		if f, ok := stdout.(interface{ Flush() error }); ok {
+			_ = f.Flush() // show progress immediately; the scan of large trees takes a while
+		}
 
 		cls := dc.matcher.Classify()
 		for _, mediaName := range cls.Media {

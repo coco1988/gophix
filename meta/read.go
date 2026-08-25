@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Info holds raw metadata values read back from a media file, keyed by
@@ -125,13 +126,26 @@ func ReadMany(paths []string) (map[string]Info, map[string]error) {
 	}
 
 	seen := make(map[string]struct{}, len(docs))
+	// normKey -> original caller path
+	wanted := make(map[string]string, len(want))
+	for _, p := range want {
+		wanted[normKey(p)] = p
+	}
 	for _, doc := range docs {
 		sf, _ := doc["SourceFile"].(string)
 		if sf == "" {
 			continue
 		}
-		if e, ok := doc["Error"]; ok && stringify(e) != "" {
-			errs[sf] = fmt.Errorf("exiftool error for %s: %s", sf, stringify(e))
+		// ExifTool echoes paths back in its own form - on Windows it uses
+		// forward slashes regardless of how the file was passed in. Match
+		// tolerantly (separator- and case-insensitive) and key the result
+		// under the exact path string the caller provided.
+		orig, ok := matchSourceFile(sf, wanted)
+		if !ok {
+			continue
+		}
+		if e, exists := doc["Error"]; exists && stringify(e) != "" {
+			errs[orig] = fmt.Errorf("exiftool error for %s: %s", sf, stringify(e))
 			continue
 		}
 		info := Info{}
@@ -141,8 +155,8 @@ func ReadMany(paths []string) (map[string]Info, map[string]error) {
 			}
 			info[k] = stringify(v)
 		}
-		infos[sf] = info
-		seen[sf] = struct{}{}
+		infos[orig] = info
+		seen[orig] = struct{}{}
 	}
 	for _, p := range want {
 		if _, ok := seen[p]; !ok {
@@ -152,6 +166,20 @@ func ReadMany(paths []string) (map[string]Info, map[string]error) {
 		}
 	}
 	return infos, errs
+}
+
+// normKey canonicalizes a path for tolerant matching: forward slashes and
+// lower case (Windows filesystems are case-insensitive; ExifTool may echo
+// the drive letter or separators in a different form than passed in).
+func normKey(p string) string {
+	return strings.ToLower(strings.ReplaceAll(p, "\\", "/"))
+}
+
+// matchSourceFile maps an ExifTool "SourceFile" echo back to the original
+// caller-provided path.
+func matchSourceFile(sourceFile string, wanted map[string]string) (string, bool) {
+	orig, ok := wanted[normKey(sourceFile)]
+	return orig, ok
 }
 
 func stringify(v any) string {

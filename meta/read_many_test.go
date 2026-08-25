@@ -64,6 +64,33 @@ func TestReadMany_SplitsResultsAndErrors(t *testing.T) {
 	}
 }
 
+// ExifTool echoes SourceFile in its own path form; on Windows that means
+// forward slashes and possibly a different drive-letter case. The bulk-read
+// must still map results back to the caller's exact path strings.
+func TestMatchSourceFile_TolerantForms(t *testing.T) {
+	win := `C:\Users\Mama\Takeout\IMG_1.jpg`
+	wanted := map[string]string{
+		normKey(win):                       win,
+		normKey("/data/Takeout/IMG_2.jpg"): "/data/Takeout/IMG_2.jpg",
+	}
+
+	cases := []struct{ echo, want string }{
+		{`C:\Users\Mama\Takeout\IMG_1.jpg`, win},               // exact as passed
+		{`C:/Users/Mama/Takeout/IMG_1.jpg`, win},               // forward slashes
+		{`c:/users/mama/takeout/img_1.jpg`, win},               // case differences
+		{"/data/Takeout/IMG_2.jpg", "/data/Takeout/IMG_2.jpg"}, // unix exact
+	}
+	for _, tc := range cases {
+		got, ok := matchSourceFile(tc.echo, wanted)
+		if !ok || got != tc.want {
+			t.Errorf("matchSourceFile(%q) = %q,%v; want %q", tc.echo, got, ok, tc.want)
+		}
+	}
+	if _, ok := matchSourceFile(`D:\somewhere\else.jpg`, wanted); ok {
+		t.Error("unrelated SourceFile must not match")
+	}
+}
+
 // A single corrupt/unreadable media file inside one chunk must not poison
 // the results of the other files in the same ExifTool call.
 func TestReadMany_BadFileDoesNotPoisonChunk(t *testing.T) {
