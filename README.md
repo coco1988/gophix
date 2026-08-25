@@ -29,6 +29,11 @@ gophix organize-by-year [options] <source> <destination>
 gophix clean-json [--yes] <root>        # optional step 4: delete sidecars of verified-repaired media
 ```
 
+Problem cases (unreadable media, invalid sidecars, write failures) can be isolated during `fix`:
+`--failed-dir <folder>` copies them — with their sidecar — into one place for inspection; add
+`--failed-move` to relocate instead. The run continues, the summary counts them, and the exit code
+stays `1` so scripts notice.
+
 ## Options
 
 | Option | Effect |
@@ -39,6 +44,7 @@ gophix clean-json [--yes] <root>        # optional step 4: delete sidecars of ve
 | `--move` | organize: move instead of copy (sources deleted only after byte-verified copy) |
 | `--include-unknown-date`, `--keep-json` | organize extras |
 | `--delete`, `--yes` | find-duplicates removal controls |
+| `--failed-dir <folder>` (+ `--failed-move`) | fix/run: isolate files whose processing failed into this folder (with their sidecar) — copy by default, move with the flag. Never overwrites; undated-but-valid media is not quarantined. |
 | `--format text\|csv\|json`, `--output <file>` | duplicate report format/destination |
 | `--jobs <N>` | Parallel ExifTool workers (default: CPU count, max 8) |
 
