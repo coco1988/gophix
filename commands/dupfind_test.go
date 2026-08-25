@@ -214,3 +214,112 @@ func TestDupFind_InvalidFormatRejected(t *testing.T) {
 		t.Fatalf("invalid --format must exit %d, got %d", ExitUsage, code)
 	}
 }
+
+// --- --delete ----------------------------------------------------------------
+
+func dupFixture(t *testing.T) (root string) {
+	t.Helper()
+	root = t.TempDir()
+	same := writeJPEGBytes(t, 11, 22, 33)
+	// keeper: library copy WITH matched sidecar (sidecar-first ranking)
+	mustWriteFile(t, filepath.Join(root, "lib", "IMG_1.jpg"), same)
+	writeFile(t, filepath.Join(root, "lib", "IMG_1.jpg.supplemental-metadata.json"),
+		`{"title":"t","photoTakenTime":{"timestamp":"1552000000"}}`)
+	// redundant: album copy without JSON sidecar but with an .xmp
+	mustWriteFile(t, filepath.Join(root, "album", "P1.jpg"), same)
+	writeFile(t, filepath.Join(root, "album", "P1.jpg.xmp"), "xmp-data")
+	// untouched bystander
+	mustWriteFile(t, filepath.Join(root, "lib", "unique.jpg"), writeJPEGBytes(t, 99, 5, 5))
+	return root
+}
+
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+// Dry-run plans the deletion but must not touch a single byte.
+func TestDupFind_DeleteDryRunTouchesNothing(t *testing.T) {
+	root := dupFixture(t)
+	code, out := run(t, "", "find-duplicates", "--dry-run", "--delete", "--verbose", root)
+	requireOK(t, out, code)
+
+	if !strings.Contains(out, "WOULD-DEL") || !strings.Contains(out, "would delete 1 file(s)") {
+		t.Fatalf("dry-run should plan exactly one deletion\noutput:\n%s", out)
+	}
+	for _, p := range []string{
+		filepath.Join(root, "album", "P1.jpg"),
+		filepath.Join(root, "album", "P1.jpg.xmp"),
+	} {
+		if !fileExists(p) {
+			t.Fatalf("dry-run deleted %s!", p)
+		}
+	}
+}
+
+// Without --yes and without a terminal answer, deletion refuses.
+func TestDupFind_DeleteRequiresConfirmation(t *testing.T) {
+	root := dupFixture(t)
+	code, out := run(t, "", "find-duplicates", "--delete", root)
+	if code != ExitErrors {
+		t.Fatalf("non-interactive --delete must fail, got %d\noutput:\n%s", code, out)
+	}
+	if !strings.Contains(out, "no interactive confirmation possible") {
+		t.Fatalf("expected confirmation refusal\noutput:\n%s", out)
+	}
+	if !fileExists(filepath.Join(root, "album", "P1.jpg")) {
+		t.Fatal("files were deleted without confirmation!")
+	}
+}
+
+// Answering 'no' aborts cleanly with exit 0.
+func TestDupFind_DeleteAbortedKeepsFiles(t *testing.T) {
+	root := dupFixture(t)
+	code, out := run(t, "n\n", "find-duplicates", "--delete", root)
+	requireOK(t, out, code)
+	if !strings.Contains(out, "aborted - nothing was deleted") {
+		t.Fatalf("expected abort notice\noutput:\n%s", out)
+	}
+	if !fileExists(filepath.Join(root, "album", "P1.jpg")) {
+		t.Fatal("aborted run deleted files!")
+	}
+}
+
+// The real thing: redundant copy + its sidecar/xmp are removed; the ★ keeper,
+// its sidecar and all unique files survive. A re-run finds nothing.
+func TestDupFind_DeleteYesRemovesRedundantCopies(t *testing.T) {
+	root := dupFixture(t)
+	code, out := run(t, "y\n", "find-duplicates", "--delete", "--verbose", root)
+	requireOK(t, out, code)
+
+	if fileExists(filepath.Join(root, "album", "P1.jpg")) {
+		t.Fatal("redundant copy was not deleted")
+	}
+	for _, orphan := range []string{
+		filepath.Join(root, "album", "P1.jpg.xmp"),
+	} {
+		if fileExists(orphan) {
+			t.Fatalf("orphan sidecar survived: %s", orphan)
+		}
+	}
+	for _, keep := range []string{
+		filepath.Join(root, "lib", "IMG_1.jpg"),
+		filepath.Join(root, "lib", "IMG_1.jpg.supplemental-metadata.json"),
+		filePathUnique(root),
+	} {
+		if !fileExists(keep) {
+			t.Fatalf("keeper/unique file missing: %s", keep)
+		}
+	}
+	if !strings.Contains(out, "deleted 1 copies (+1 sidecars)") {
+		t.Fatalf("footer accounting wrong\noutput:\n%s", out)
+	}
+
+	// second run: family is gone
+	code, out = run(t, "", "find-duplicates", root)
+	requireOK(t, out, code)
+	if !strings.Contains(out, "no duplicates found") {
+		t.Fatalf("re-run must find no duplicates\noutput:\n%s", out)
+	}
+}
+
+func filePathUnique(root string) string {
+	return filepath.Join(root, "lib", "unique.jpg")
+}

@@ -122,6 +122,10 @@ Options:
                                   from --output extension, else text).
   --output <file|->               find-duplicates only: write the report to a file
                                   instead of stdout ("-" = stdout).
+  --delete                        find-duplicates only: delete the redundant copies of each
+                                  duplicate family (never the ★ keeper). Asks for confirmation
+                                  unless --yes; --dry-run only plans. Also removes a deleted
+                                  copy's own JSON sidecar / .xmp.
   --no-filename-fallback          Never derive capture dates from filenames.
   --jobs <N>                      Parallel ExifTool workers (default: number of CPUs, max 8).
   --assume-noon-for-date-only     Use 12:00:00 for date-only filename matches (default: off).
@@ -191,6 +195,7 @@ type parsedArgs struct {
 	layout     string
 	format     string
 	output     string
+	del        bool
 }
 
 func parseArgs(args []string) (*parsedArgs, error) {
@@ -209,6 +214,8 @@ func parseArgs(args []string) (*parsedArgs, error) {
 			p.g.ForceJSON = true
 		case a == "--yes":
 			p.yes = true
+		case a == "--delete":
+			p.del = true
 		case a == "--move":
 			p.move = true
 		case a == "--include-unknown-date":
@@ -335,8 +342,10 @@ func Run(args []string, stdout io.Writer, stderr io.Writer, stdin io.Reader) int
 			root:   cleanPathArg(p.positional[0]),
 			format: format,
 			output: p.output,
+			delete: p.del,
+			yes:    p.yes,
 			g:      p.g,
-		}, bw)
+		}, stdin, bw)
 	default:
 		fmt.Fprintf(stderr, "error: unknown command %q\n\n%s", cmd, usage)
 		return ExitUsage

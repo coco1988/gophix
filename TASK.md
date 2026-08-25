@@ -159,6 +159,8 @@ CLI controls:
        every output block captured from real runs), per-option examples for all four commands, expanded
        Windows section; PROJECT.md gained worked matching + timezone examples; dry-run rename line now
        worded as "would rename" (was past tense during dry-run)
+27. [x] `find-duplicates --delete`: remove redundant copies (never the ★ keeper) with confirmation/`--yes`,
+       dry-run planning, orphan-free sidecar/XMP cleanup, freed-bytes accounting in report + footer
 
 ## Test matrix
 
@@ -234,6 +236,10 @@ checks (copies of real Takeout data): M1–M5.
 | D6 | Empty tree → explicit note, exit 0 | integration | `TestDupFind_EmptyTree` |
 | D7 | Invalid `--format` rejected with exit 2 | integration | `TestDupFind_InvalidFormatRejected` |
 | R1 | Concurrent same-name organize copies never fail or lose data | stress | `TestOrganize_FlatCollisionNeverOverwrites -count=30` |
+| D8 | `--delete` without confirmation refuses, nothing removed | integration | `TestDupFind_DeleteRequiresConfirmation` |
+| D9 | Answering 'no' aborts cleanly (exit 0) | integration | `TestDupFind_DeleteAbortedKeepsFiles` |
+| D10 | `--dry-run --delete` plans, touches nothing | integration | `TestDupFind_DeleteDryRunTouchesNothing` |
+| D11 | `--delete --yes`: keeper + sidecar + unique files survive; copy + its sidecar/.xmp removed; re-run clean | integration | `TestDupFind_DeleteYesRemovesRedundantCopies` |
 
 ## Build / test / smoke commands
 
@@ -365,8 +371,8 @@ See PROJECT.md §"Verified remaining limitations" (kept in sync).
 
 ## Future work (parked ideas, not scheduled)
 
-- Duplicate finder: ~~content-hash report~~ **implemented as `find-duplicates`**; possible follow-ups:
-  `--delete` with keep-policy + confirmation, perceptual/`-edited` near-duplicate matching.
+- Duplicate finder: ~~content-hash report~~ **implemented as `find-duplicates`**; ~~`--delete` with
+  keep-policy + confirmation~~ **implemented**; remaining follow-up: perceptual/`-edited` near-duplicate matching.
 - Include/exclude glob filters for `organize-by-year` to organize subsets without staging copies.
 - Summary export (`--report json|csv`) for large-run bookkeeping.
 - Day-level layout variant (`yyyy/mm/dd`) for `organize-by-year`.

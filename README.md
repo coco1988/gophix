@@ -415,6 +415,11 @@ report only, nothing is ever deleted or modified.
 ./gophix find-duplicates --output dupes.csv "/data/Takeout" # format inferred from extension
 ./gophix find-duplicates --output dupes.json --format json "/data/Takeout"
 ./gophix find-duplicates --format json --output - "/data/Takeout"   # JSON to stdout
+
+# delete the redundant copies (never the ★ keeper):
+./gophix find-duplicates --dry-run --delete "/data/Takeout"  # plan first - deletes nothing
+./gophix find-duplicates --delete "/data/Takeout"            # asks: Really delete N files? [y/N]
+./gophix find-duplicates --delete --yes "/data/Takeout"      # non-interactive
 ```
 
 Sample text report (from the walkthrough above):
@@ -432,6 +437,17 @@ CSV columns: `hash,path,bytes,is_keep,has_sidecar,capture_date` — exactly one 
   skipped). Requires no ExifTool.
 - Each family lists all copies with a ★ keep suggestion (copy with sidecar first, then shorter path).
 - Exit code stays `0` when duplicates are found; `1` only for processing errors (unreadable files).
+
+### Deleting duplicates (`--delete`)
+
+Duplicates are exact byte copies, so removing surplus ones is lossless. Safety rails:
+
+- Only the non-★ copies of each family are removed; the keeper always survives.
+- `--dry-run --delete` plans only; `--delete` asks `Really delete N files? [y/N]`; `--yes` skips the
+  prompt for scripts.
+- A deleted copy's own JSON sidecar and `<media>.xmp` are removed too — no orphans are left.
+- Deletion failures (permissions) are reported per file and make the exit code `1`.
+- The report/footer states exactly what was deleted and how many bytes were freed.
 
 Recommended order: **find-duplicates → fix → organize-by-year**. Dedupe first while Google's copies
 are still byte-identical; after `fix`, repaired files differ from their unfixed album copies and can

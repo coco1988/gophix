@@ -22,6 +22,8 @@ type dupCfg struct {
 	root   string
 	format string // "text" | "csv" | "json"
 	output string // "" or "-" -> stdout, else file (format inferred from extension)
+	delete bool   // remove redundant copies (never the suggested keeper)
+	yes    bool   // skip the interactive confirmation
 	g      globalOpts
 }
 
@@ -36,6 +38,7 @@ type dupCopy struct {
 	hasSidecar  bool
 	captureDate string // "YYYY-MM-DD" from the sidecar when available
 	isKeep      bool
+	deleted     bool // --delete: this copy was removed (or planned, in dry-run)
 }
 
 type dupFamily struct {
@@ -53,9 +56,15 @@ type dupStats struct {
 	families        int
 	redundant       int
 	reclaimable     int64
+
+	dryRun          bool
+	deletePlanned   bool  // --delete given and not aborted
+	deletedCopies   int   // real deletions, or planned count in dry-run
+	deletedSidecars int   // JSON sidecars / .xmp removed alongside copies
+	freed           int64 // bytes freed (or would-be, in dry-run)
 }
 
-func runFindDuplicates(cfg dupCfg, stdout io.Writer) int {
+func runFindDuplicates(cfg dupCfg, stdin io.Reader, stdout io.Writer) int {
 	if fi, err := os.Stat(cfg.root); err != nil {
 		fmt.Fprintf(stdout, "error: cannot access %s: %v\n", cfg.root, err)
 		return ExitErrors
@@ -87,7 +96,7 @@ func runFindDuplicates(cfg dupCfg, stdout io.Writer) int {
 		return ExitErrors
 	}
 
-	st := dupStats{dirsScanned: dirsScanned, filesScanned: len(files)}
+	st := dupStats{dirsScanned: dirsScanned, filesScanned: len(files), dryRun: cfg.g.DryRun}
 
 	// Size prefilter: a file whose byte size is unique cannot have an exact
 	// duplicate - only sizes shared by >= 2 files are worth hashing.
@@ -136,6 +145,7 @@ func runFindDuplicates(cfg dupCfg, stdout io.Writer) int {
 	}
 
 	var fams []dupFamily
+	sidecarByPath := make(map[string]string)
 	for d, idxs := range byDigest {
 		if len(idxs) < 2 {
 			continue
@@ -147,6 +157,7 @@ func runFindDuplicates(cfg dupCfg, stdout io.Writer) int {
 				c.captureDate = sidecarCaptureDate(files[fi].sidecar, cfg.g.Verbose, stdout)
 			}
 			copies[k] = c
+			sidecarByPath[files[fi].path] = files[fi].sidecar
 		}
 		sortCopiesForKeep(copies)
 		copies[0].isKeep = true
@@ -160,6 +171,13 @@ func runFindDuplicates(cfg dupCfg, stdout io.Writer) int {
 		st.reclaimable += files[idxs[0]].size * int64(len(copies)-1)
 	}
 	sort.Slice(fams, func(a, b int) bool { return fams[a].copies[0].path < fams[b].copies[0].path })
+
+	if cfg.delete {
+		if err := deleteDuplicates(cfg, fams, &st, sidecarByPath, stdin, stdout); err != nil {
+			fmt.Fprintf(stdout, "error: %v\n", err)
+			return ExitErrors
+		}
+	}
 
 	target := stdout
 	closer := func() {}
@@ -189,6 +207,74 @@ func runFindDuplicates(cfg dupCfg, stdout io.Writer) int {
 		return ExitErrors
 	}
 	return ExitOK
+}
+
+// deleteDuplicates removes every non-keep copy of each family (never the
+// suggested keeper). A deleted copy's own matched JSON sidecar and any
+// <media>.xmp are removed as well, so no orphans are left behind.
+//
+// Safety rails: --dry-run only marks; without --yes an interactive
+// confirmation is required (refuses non-interactive sessions); deletion
+// failures are reported per file and fail the run.
+func deleteDuplicates(cfg dupCfg, fams []dupFamily, st *dupStats, sidecarByPath map[string]string, stdin io.Reader, stdout io.Writer) error {
+	var targets int
+	var bytes int64
+	for _, f := range fams {
+		targets += len(f.copies) - 1
+		bytes += f.size * int64(len(f.copies)-1)
+	}
+	if targets == 0 {
+		return nil
+	}
+	st.deletePlanned = true
+
+	if !cfg.g.DryRun && !cfg.yes {
+		ok, err := confirm(stdin, stdout,
+			fmt.Sprintf("delete %d duplicate file(s) (%s)", targets, humanBytes(bytes)))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Fprintln(stdout, "aborted - nothing was deleted")
+			st.deletePlanned = false
+			return nil
+		}
+	}
+
+	for fi := range fams {
+		f := &fams[fi]
+		for ci := 1; ci < len(f.copies); ci++ { // skip the keeper
+			c := &f.copies[ci]
+			st.freed += f.size
+			st.deletedCopies++ // counts real deletions, or plans in dry-run
+			c.deleted = true
+			if cfg.g.DryRun {
+				if sidecarByPath[c.path] != "" {
+					st.deletedSidecars++
+				}
+				continue
+			}
+			if err := os.Remove(c.path); err != nil {
+				st.failed++
+				st.deletedCopies--
+				st.freed -= f.size
+				c.deleted = false
+				fmt.Fprintf(stdout, "warning: cannot delete %s: %v\n", c.path, err)
+				continue
+			}
+			if sc := sidecarByPath[c.path]; sc != "" {
+				if err := os.Remove(sc); err == nil {
+					st.deletedSidecars++
+				} else if cfg.g.Verbose {
+					fmt.Fprintf(stdout, "   (sidecar kept: %s: %v)\n", sc, err)
+				}
+			}
+			if err := os.Remove(c.path + ".xmp"); err == nil {
+				st.deletedSidecars++
+			}
+		}
+	}
+	return nil
 }
 
 // sortCopiesForKeep orders copies so index 0 is the suggested keeper:
@@ -241,9 +327,22 @@ func printDupFooter(stdout io.Writer, st dupStats, outputFile string) {
 			st.filesScanned, st.dirsScanned, st.hashed, st.skippedUniquest, loc)
 		return
 	}
+
+	var mid string
+	switch {
+	case !st.deletePlanned:
+		mid = fmt.Sprintf(", %s reclaimable", humanBytes(st.reclaimable))
+	case st.dryRun:
+		mid = fmt.Sprintf(", [dry-run] would delete %d copies (+%d sidecars), %s freed",
+			st.deletedCopies, st.deletedSidecars, humanBytes(st.freed))
+	default:
+		mid = fmt.Sprintf(", deleted %d copies (+%d sidecars), %s freed",
+			st.deletedCopies, st.deletedSidecars, humanBytes(st.freed))
+	}
+
 	fmt.Fprintf(stdout,
-		"%d duplicate families: %d redundant copies, %s reclaimable (%d files in %d directories, %d hashed, %d skipped by unique size) - %s\n",
-		st.families, st.redundant, humanBytes(st.reclaimable),
+		"%d duplicate families: %d redundant copies%s (%d files in %d directories, %d hashed, %d skipped by unique size) - %s\n",
+		st.families, st.redundant, mid,
 		st.filesScanned, st.dirsScanned, st.hashed, st.skippedUniquest, loc)
 }
 
@@ -267,24 +366,38 @@ func writeDupText(w io.Writer, fams []dupFamily, st dupStats) {
 			case c.hasSidecar:
 				meta = " (sidecar)"
 			}
-			if c.isKeep {
+			switch {
+			case c.isKeep:
 				fmt.Fprintf(w, " ★ KEEP %s%s\n", c.path, meta)
-			} else {
+			case st.deletePlanned && c.deleted && st.dryRun:
+				fmt.Fprintf(w, " 🗑 WOULD-DEL %s%s\n", c.path, meta)
+			case st.deletePlanned && c.deleted:
+				fmt.Fprintf(w, " 🗑 DEL    %s%s\n", c.path, meta)
+			default:
 				fmt.Fprintf(w, "        %s%s\n", c.path, meta)
 			}
 		}
 	}
-	fmt.Fprintln(w, "\nThis is a report only - nothing was deleted or modified.")
+	switch {
+	case st.deletePlanned && st.dryRun:
+		fmt.Fprintf(w, "\n[dry-run] would delete %d file(s) (%s) - nothing was removed.\n",
+			st.deletedCopies, humanBytes(st.freed))
+	case st.deletePlanned:
+		fmt.Fprintf(w, "\nDeleted %d file(s), %s freed.\n", st.deletedCopies, humanBytes(st.freed))
+	default:
+		fmt.Fprintln(w, "\nThis is a report only - nothing was deleted or modified.")
+	}
 }
 
 func writeDupCSV(w io.Writer, fams []dupFamily) {
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"hash", "path", "bytes", "is_keep", "has_sidecar", "capture_date"})
+	_ = cw.Write([]string{"hash", "path", "bytes", "is_keep", "is_deleted", "has_sidecar", "capture_date"})
 	for _, fam := range fams {
 		for _, c := range fam.copies {
 			_ = cw.Write([]string{
 				fam.hash, c.path, fmt.Sprintf("%d", fam.size),
-				fmt.Sprintf("%t", c.isKeep), fmt.Sprintf("%t", c.hasSidecar),
+				fmt.Sprintf("%t", c.isKeep), fmt.Sprintf("%t", c.deleted),
+				fmt.Sprintf("%t", c.hasSidecar),
 				c.captureDate,
 			})
 		}
@@ -295,6 +408,7 @@ func writeDupCSV(w io.Writer, fams []dupFamily) {
 type dupJSONCopy struct {
 	Path        string `json:"path"`
 	IsKeep      bool   `json:"is_keep"`
+	IsDeleted   bool   `json:"is_deleted,omitempty"`
 	HasSidecar  bool   `json:"has_sidecar"`
 	CaptureDate string `json:"capture_date,omitempty"`
 }
@@ -325,11 +439,21 @@ func writeDupJSON(w io.Writer, fams []dupFamily, st dupStats) {
 		},
 		Families: make([]dupJSONFamily, 0, len(fams)),
 	}
+	if st.deletePlanned {
+		if st.dryRun {
+			rep.Summary["planned_deletions"] = st.deletedCopies
+		} else {
+			rep.Summary["deleted_copies"] = st.deletedCopies
+			rep.Summary["deleted_sidecars"] = st.deletedSidecars
+		}
+		rep.Summary["freed_bytes"] = st.freed
+	}
 	for _, fam := range fams {
 		jf := dupJSONFamily{Hash: fam.hash, Bytes: fam.size, Keep: fam.copies[0].path}
 		for _, c := range fam.copies {
 			jf.Copies = append(jf.Copies, dupJSONCopy{
-				Path: c.path, IsKeep: c.isKeep, HasSidecar: c.hasSidecar, CaptureDate: c.captureDate,
+				Path: c.path, IsKeep: c.isKeep, IsDeleted: c.deleted,
+				HasSidecar: c.hasSidecar, CaptureDate: c.captureDate,
 			})
 		}
 		rep.Families = append(rep.Families, jf)

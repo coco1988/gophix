@@ -211,12 +211,13 @@ gophix organize-by-year [--dry-run] [--verbose] [--move] [--include-unknown-date
                         [--layout yyyy|yyyy/mm|yyyy-mm|flat] <source-path> <destination-path>
 
 gophix find-duplicates [--format text|csv|json] [--output <file>|-] [--verbose]
-                       <takeout-media-root>
+                       [--delete [--yes]] <takeout-media-root>
 
 gophix version | help
 ```
 
-Exit codes: `0` success (warnings allowed; for `find-duplicates` also "duplicates found") ·
+Exit codes: `0` success (warnings allowed; for `find-duplicates` also "duplicates found"/deletions
+completed) ·
 `1` at least one processing error · `2` usage error · `3` ExifTool not found
 (`find-duplicates` never requires ExifTool and can therefore not exit `3`).
 
@@ -246,14 +247,18 @@ An empty tree prints an explicit "nothing to do" note (not a false success).
   `yyyy-mm` → `<dst>/2020-12/f.jpg`; `flat` → `<dst>/f.jpg`. Invalid values are rejected at
   argument-parse time (exit code 2). Collision handling, Unknown placement, copy/move semantics and
   sidecar naming are identical across layouts.
-- `find-duplicates`: report only — never deletes, moves or modifies anything. Scans with the same
-  media detection as the other commands, hashes only files whose byte size collides with at least one
-  other file (streaming SHA-256, parallel workers), and groups equal digests into families. Each
-  family carries a deterministic keep suggestion (copy with matched sidecar first, then shorter path,
-  then lexicographic) marked ★; the suggestion is advisory. Reports render as text (default), CSV
-  (`hash,path,bytes,is_keep,has_sidecar,capture_date`) or JSON (summary + families); `--output`
-  infers the format from the file extension unless `--format` overrides it. Exact byte duplicates
-  only — `-edited` variants or perceptual near-duplicates are out of scope.
+- `find-duplicates`: scans with the same media detection as the other commands, hashes only files
+  whose byte size collides with at least one other file (streaming SHA-256, parallel workers), and
+  groups equal digests into families. Each family carries a deterministic keep suggestion (copy with
+  matched sidecar first, then shorter path, then lexicographic) marked ★; the suggestion is advisory.
+  Reports render as text (default), CSV (`hash,path,bytes,is_keep,is_deleted,has_sidecar,capture_date`)
+  or JSON (summary + families); `--output` infers the format from the file extension unless `--format`
+  overrides it. Exact byte duplicates only — `-edited` variants or perceptual near-duplicates are out
+  of scope. Without `--delete` the command never modifies anything.
+- `find-duplicates --delete`: removes exactly the non-★ copies of each family. Confirmation prompt
+  unless `--yes`; `--dry-run` plans without touching anything; the deleted copy's own JSON sidecar and
+  `<media>.xmp` are removed with it (no orphans); per-file failures are warnings and fail the run;
+  report and footer state what was removed and the bytes freed.
 - Extension fixing may rename media (`png` masquerading as `jpg`); association survives across runs via
   the reverse-renamed matching rule.
 
