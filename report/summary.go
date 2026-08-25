@@ -20,6 +20,7 @@ type Summary struct {
 	AlreadyCorrect int
 	NoSidecar      int
 	Undated        int // media without any usable date source (left untouched)
+	Quarantined    int // failed media copied/moved to the error folder
 	Failed         int
 	JunkIgnored    int
 
@@ -89,6 +90,9 @@ func (s *Summary) Print(w io.Writer) {
 	fmt.Fprintf(w, "   skipped without sidecar:   %d\n", s.NoSidecar)
 	if s.Undated > 0 {
 		fmt.Fprintf(w, "   undated (left untouched):  %d\n", s.Undated)
+	}
+	if s.Quarantined > 0 {
+		fmt.Fprintf(w, "   moved to error folder:     %d\n", s.Quarantined)
 	}
 	fmt.Fprintf(w, "   failed:                    %d\n", s.Failed)
 	if s.FSModSet > 0 || s.FSCreateSet > 0 || s.FSCreateUnsupported > 0 {

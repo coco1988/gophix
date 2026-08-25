@@ -84,6 +84,9 @@ Options:
   --format <text|csv|json>, --output <file|->  find-duplicates report format/destination.
   --yes                           Skip confirmation prompts (scripts).
   --jobs <N>                      Parallel ExifTool workers (default: CPU count, max 8).
+  --failed-dir <folder>           fix/run: copy files whose processing failed into this
+                                  folder (with their sidecar) for inspection/retry.
+  --failed-move                   fix/run: move failed files instead of copying.
 
 Examples:
   gophix run --dry-run "Takeout" "Organized"        # plan the whole pipeline
@@ -116,6 +119,11 @@ func Run(args []string, stdout io.Writer, stderr io.Writer, stdin io.Reader) int
 	}
 	if len(p.positional) == 0 {
 		fmt.Fprintf(stderr, "error: missing path argument\n\n%s", usage)
+		return ExitUsage
+	}
+
+	if p.g.FailedMove && p.g.FailedDir == "" {
+		fmt.Fprintln(stderr, "error: --failed-move needs --failed-dir <folder>")
 		return ExitUsage
 	}
 
@@ -278,6 +286,14 @@ func parseArgs(args []string) (*parsedArgs, error) {
 			}
 			if v, ok := flagValue(args, &i, "--output"); ok {
 				p.output = v
+				continue
+			}
+			if v, ok := flagValue(args, &i, "--failed-dir"); ok {
+				p.g.FailedDir = v
+				continue
+			}
+			if a == "--failed-move" {
+				p.g.FailedMove = true
 				continue
 			}
 			return nil, fmt.Errorf("unknown option %q", a)

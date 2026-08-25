@@ -301,3 +301,80 @@ func TestV2_FSDatesSetWithoutTimezone(t *testing.T) {
 		t.Fatalf("unexpected DO: %q", i["ExifIFD:DateTimeOriginal"])
 	}
 }
+
+// Failed files land in the error folder (copy default), sidecar included.
+// A deterministic failure source: a matched sidecar with invalid JSON.
+func TestV2_FailedQuarantineCopy(t *testing.T) {
+	hasExiftool(t)
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.jpg")
+	v2writeJPEG(t, good)
+	v2sidecar(t, dir, "good.jpg", tsRome2022)
+
+	bad := filepath.Join(dir, "broken.jpg")
+	v2writeJPEG(t, bad)
+	writeFile(t, filepath.Join(dir, "broken.jpg.supplemental-metadata.json"), "{not valid json")
+
+	q := filepath.Join(t.TempDir(), "errors")
+	code, out := run(t, "", "fix", "--failed-dir", q, "--verbose", dir)
+	if code != ExitErrors {
+		t.Fatalf("expected exit %d, got %d\noutput:\n%s", ExitErrors, code, out)
+	}
+	if _, err := os.Stat(filepath.Join(q, "broken.jpg")); err != nil {
+		t.Fatalf("failed file not quarantined: %v\noutput:\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(q, "broken.jpg.supplemental-metadata.json")); err != nil {
+		t.Fatalf("sidecar should accompany the failed file: %v", err)
+	}
+	if _, err := os.Stat(bad); err != nil {
+		t.Fatal("copy mode must keep the original in place")
+	}
+	if _, err := os.Stat(good); err != nil {
+		t.Fatal("good file must stay untouched")
+	}
+	if !strings.Contains(out, "moved to error folder:") {
+		t.Fatalf("summary counter missing\noutput:\n%s", out)
+	}
+}
+
+// --failed-move relocates instead of copying.
+func TestV2_FailedQuarantineMove(t *testing.T) {
+	hasExiftool(t)
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "broken2.jpg")
+	v2writeJPEG(t, bad)
+	writeFile(t, filepath.Join(dir, "broken2.jpg.supplemental-metadata.json"), "{")
+
+	q := filepath.Join(t.TempDir(), "errors")
+	code, _ := run(t, "", "fix", "--failed-dir", q, "--failed-move", dir)
+	if code != ExitErrors {
+		t.Fatalf("expected exit %d, got %d", ExitErrors, code)
+	}
+	if _, err := os.Stat(filepath.Join(q, "broken2.jpg")); err != nil {
+		t.Fatalf("not moved to error folder: %v", err)
+	}
+	if _, err := os.Stat(bad); !os.IsNotExist(err) {
+		t.Fatal("move mode must remove the original after relocation")
+	}
+}
+
+// Dry-run plans quarantine without touching anything.
+func TestV2_FailedQuarantineDryRun(t *testing.T) {
+	hasExiftool(t)
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "broken3.jpg")
+	v2writeJPEG(t, bad)
+	writeFile(t, filepath.Join(dir, "broken3.jpg.supplemental-metadata.json"), "[")
+
+	q := filepath.Join(t.TempDir(), "errors")
+	code, out := run(t, "", "fix", "--dry-run", "--failed-dir", q, dir)
+	if code != ExitErrors { // still reported as error
+		t.Fatalf("expected exit %d, got %d", ExitErrors, code)
+	}
+	if !strings.Contains(out, "would") || !strings.Contains(out, q) {
+		t.Fatalf("dry-run should plan the quarantine\noutput:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(q)); !os.IsNotExist(err) {
+		t.Fatal("dry-run must not create the error folder")
+	}
+}

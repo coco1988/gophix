@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/alexdachin/gophix/meta"
@@ -35,23 +36,27 @@ func matchAndParse(dc *dirContext, mediaName string, g *globalOpts, sum *report.
 }
 
 type fixJob struct {
-	mediaPath string
-	sc        *takeout.Sidecar // nil = no sidecar matched/parsed
-	matched   bool
-	cur       meta.Info // bulk-read before the pool runs
-	readErr   error
+	mediaPath   string
+	sc          *takeout.Sidecar // nil = no sidecar matched/parsed
+	sidecarPath string           // matched sidecar file ("" when none)
+	matched     bool
+	preErr      error // detected during scan (e.g. invalid sidecar)
+	cur         meta.Info
+	readErr     error
 }
 
 type fixResult struct {
-	path      string
-	outcome   meta.Outcome
-	fsRes     meta.FSResult
-	source    string // date source label
-	err       error
-	warnings  []string
-	noSidecar bool
-	undated   bool
-	renameLn  string
+	path          string
+	outcome       meta.Outcome
+	fsRes         meta.FSResult
+	source        string // date source label
+	err           error
+	warnings      []string
+	noSidecar     bool
+	undated       bool
+	renameLn      string
+	quarantineMsg string
+	quarantined   int
 }
 
 func runFix(root string, g *globalOpts, zone *time.Location, sum *report.Summary, stdout io.Writer) int {
@@ -75,10 +80,23 @@ func runFix(root string, g *globalOpts, zone *time.Location, sum *report.Summary
 			mediaPath := filepath.Join(dc.path, mediaName)
 			sc, m := matchAndParse(dc, mediaName, g, sum)
 			if sc == nil && m.Found() {
-				sum.Failed++
+				// Sidecar matched but unreadable/invalid: a real processing
+				// error for THIS media - routed through the normal failure
+				// path so --failed-dir quarantine applies.
+				jobs = append(jobs, fixJob{
+					mediaPath:   mediaPath,
+					sidecarPath: sidecarPathFor(dc.path, m),
+					matched:     true,
+					preErr:      fmt.Errorf("sidecar could not be used (unreadable or invalid JSON)"),
+				})
 				continue
 			}
-			jobs = append(jobs, fixJob{mediaPath: mediaPath, sc: sc, matched: m.Found()})
+			jobs = append(jobs, fixJob{
+				mediaPath:   mediaPath,
+				sc:          sc,
+				sidecarPath: sidecarPathFor(dc.path, m),
+				matched:     m.Found(),
+			})
 		}
 		return nil
 	})
@@ -114,8 +132,17 @@ func runFix(root string, g *globalOpts, zone *time.Location, sum *report.Summary
 func processFixJob(job fixJob, g *globalOpts, zone *time.Location, stdout io.Writer) fixResult {
 	res := fixResult{path: job.mediaPath, outcome: meta.OutcomeFailed, noSidecar: !job.matched}
 
-	if job.readErr != nil {
-		res.err = job.readErr
+	if job.preErr != nil || job.readErr != nil {
+		if job.preErr != nil {
+			res.err = job.preErr
+		} else {
+			res.err = job.readErr
+		}
+		if g.FailedDir != "" {
+			q := quarantineFailed(job.mediaPath, job.sidecarPath, g, stdout)
+			res.quarantineMsg = q.msg
+			res.quarantined = q.count
+		}
 		return res
 	}
 	curInfo := job.cur
@@ -145,10 +172,101 @@ func processFixJob(job fixJob, g *globalOpts, zone *time.Location, stdout io.Wri
 	// curInfo stays valid even after a rename: tag values don't depend on names.
 	outcome, fsRes, err := meta.Apply(plan, curInfo, opts)
 	res.outcome, res.fsRes, res.err = outcome, fsRes, err
+
+	if res.err != nil && g.FailedDir != "" {
+		q := quarantineFailed(mediaPath, job.sidecarPath, g, stdout)
+		res.quarantineMsg = q.msg
+		res.quarantined = q.count
+	}
 	return res
 }
 
+// sidecarPathFor resolves the matched sidecar's full path.
+func sidecarPathFor(dir string, m takeout.Match) string {
+	if !m.Found() {
+		return ""
+	}
+	return filepath.Join(dir, m.FileName)
+}
+
+type quarantineOutcome struct {
+	msg   string // human-readable line ("" = nothing done)
+	count int    // number of files actually/planned relocated
+}
+
+// quarantineFailed relocates a failed media file (+ its own matched sidecar
+// and any .xmp) to the error folder. Copy is the default; --failed-move moves.
+// Never overwrites: existing targets get a numeric suffix. Undated-but-valid
+// media is never quarantined - only actual processing errors are.
+func quarantineFailed(mediaPath, sidecarPath string, g *globalOpts, stdout io.Writer) quarantineOutcome {
+	if g.DryRun {
+		target := uniqueTarget(filepath.Join(g.FailedDir, filepath.Base(mediaPath)))
+		verb := "copied"
+		if g.FailedMove {
+			verb = "moved"
+		}
+		return quarantineOutcome{msg: fmt.Sprintf("[dry-run] would %s failed file to %s", verb, target), count: 1}
+	}
+	if err := os.MkdirAll(g.FailedDir, 0o755); err != nil {
+		return quarantineOutcome{msg: fmt.Sprintf("cannot create error folder %s: %v", g.FailedDir, err)}
+	}
+	target := uniqueTarget(filepath.Join(g.FailedDir, filepath.Base(mediaPath)))
+	verb := "copied"
+	if g.FailedMove {
+		verb = "moved"
+	}
+
+	if g.FailedMove {
+		if err := os.Rename(mediaPath, target); err != nil {
+			return quarantineOutcome{msg: fmt.Sprintf("cannot move %s to error folder: %v", mediaPath, err)}
+		}
+	} else if _, err := copyVerified(mediaPath, target); err != nil {
+		os.Remove(target)
+		return quarantineOutcome{msg: fmt.Sprintf("cannot copy %s to error folder: %v", mediaPath, err)}
+	}
+	count := 1
+
+	// sidecar + xmp follow under the (possibly suffixed) media name.
+	baseOld := filepath.Base(mediaPath)
+	baseNew := filepath.Base(target)
+	for _, extra := range []string{sidecarPath, mediaPath + ".xmp"} {
+		if extra == "" {
+			continue
+		}
+		if _, err := os.Stat(extra); err != nil {
+			continue
+		}
+		suffix := strings.TrimPrefix(filepath.Base(extra), baseOld)
+		extraTarget := uniqueTarget(filepath.Join(g.FailedDir, baseNew+suffix))
+		if g.FailedMove {
+			if err := os.Rename(extra, extraTarget); err == nil {
+				count++
+			}
+		} else if _, err := copyVerified(extra, extraTarget); err == nil {
+			count++
+		}
+	}
+	return quarantineOutcome{msg: fmt.Sprintf("%s to error folder: %s (%s)", verb, target, filepath.Base(mediaPath)), count: count}
+}
+
+// uniqueTarget returns path, or a variant with _N before the extension that
+// does not exist yet (deterministic order, never overwrites).
+func uniqueTarget(path string) string {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	for i := 1; ; i++ {
+		cand := fmt.Sprintf("%s_%d%s", base, i, ext)
+		if _, err := os.Stat(cand); os.IsNotExist(err) {
+			return cand
+		}
+	}
+}
+
 func collectFixResult(r fixResult, g *globalOpts, sum *report.Summary, stdout io.Writer) {
+	sum.Quarantined += r.quarantined
 	base := filepath.Base(r.path)
 	for _, w := range r.warnings {
 		sum.Warnf("%s: %s", base, w)
@@ -165,6 +283,9 @@ func collectFixResult(r fixResult, g *globalOpts, sum *report.Summary, stdout io
 	case r.err != nil:
 		sum.Errorf("could not update %s: %v", r.path, r.err)
 		sum.Failed++
+		if r.quarantineMsg != "" {
+			fmt.Fprintf(stdout, "   📦 %s\n", r.quarantineMsg)
+		}
 	case r.undated:
 		sum.Undated++
 	case r.outcome == meta.OutcomeAlreadyCorrect:

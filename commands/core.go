@@ -28,10 +28,12 @@ const version = "2.0.0"
 
 // globalOpts holds flags shared by the subcommands.
 type globalOpts struct {
-	DryRun   bool
-	Verbose  bool
-	Timezone string // IANA zone or ±HH:MM; empty = write UTC digits for JSON dates
-	Jobs     int
+	DryRun     bool
+	Verbose    bool
+	Timezone   string // IANA zone or ±HH:MM; empty = write UTC digits for JSON dates
+	Jobs       int
+	FailedDir  string // quarantine folder for media whose fix failed ("" = off)
+	FailedMove bool   // move failed media instead of copying
 }
 
 // cleanPathArg repairs path arguments mangled by Windows shell quoting
