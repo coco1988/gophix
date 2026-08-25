@@ -57,18 +57,50 @@ func isValidLayout(v string) bool {
 	return false
 }
 
+var validDupFormats = []string{"text", "csv", "json"}
+
+func isValidDupFormat(v string) bool {
+	for _, f := range validDupFormats {
+		if f == v {
+			return true
+		}
+	}
+	return false
+}
+
+// inferDupFormat picks the report format from the output file extension
+// (.csv/.json); anything else defaults to text. An explicit --format wins.
+func inferDupFormat(output, explicit string) (string, error) {
+	if explicit != "" {
+		if !isValidDupFormat(explicit) {
+			return "", fmt.Errorf("invalid --format %q (want %s)", explicit, strings.Join(validDupFormats, ", "))
+		}
+		return explicit, nil
+	}
+	switch strings.ToLower(filepath.Ext(output)) {
+	case ".csv":
+		return "csv", nil
+	case ".json":
+		return "json", nil
+	default:
+		return "text", nil
+	}
+}
+
 const usage = `gophix - restore Google Photos Takeout metadata into your media
 
 Usage:
   gophix fix [options] <takeout-media-root>
   gophix clean-json [options] <takeout-media-root>
   gophix organize-by-year [options] <source-path> <destination-path>
+  gophix find-duplicates [options] <takeout-media-root>
   gophix version | help
 
 Commands:
   fix               Merge sidecar metadata (dates, GPS, description) into media.
   clean-json        Delete matched & verified JSON sidecars (safe by default).
   organize-by-year  Copy or move media into date folders by capture date.
+  find-duplicates   Report exact duplicate content (report-only, never deletes).
 
 Options:
   --dry-run                       Plan only; never write, rename, move or delete.
@@ -86,6 +118,10 @@ Options:
                                   yyyy/mm   2020/12/file.jpg
                                   yyyy-mm   2020-12/file.jpg
                                   flat      file.jpg                (all in one)
+  --format <text|csv|json>        find-duplicates only: report format (default: inferred
+                                  from --output extension, else text).
+  --output <file|->               find-duplicates only: write the report to a file
+                                  instead of stdout ("-" = stdout).
   --no-filename-fallback          Never derive capture dates from filenames.
   --jobs <N>                      Parallel ExifTool workers (default: number of CPUs, max 8).
   --assume-noon-for-date-only     Use 12:00:00 for date-only filename matches (default: off).
@@ -95,6 +131,8 @@ Examples:
   gophix fix --timezone Europe/Berlin "/data/Takeout/Google Fotos"
   gophix organize-by-year --dry-run "/data/Takeout/Google Fotos" "/data/Organized"
   gophix organize-by-year --layout yyyy/mm "/data/Takeout/Google Fotos" "/data/Organized"
+  gophix find-duplicates "/data/Takeout/Google Fotos"
+  gophix find-duplicates --output dupes.csv "/data/Takeout/Google Fotos"
   gophix clean-json --yes "/data/Takeout/Google Fotos"
 
 Always work on a copy of your Takeout export.
@@ -151,6 +189,8 @@ type parsedArgs struct {
 	includeUnk bool
 	keepJSON   bool
 	layout     string
+	format     string
+	output     string
 }
 
 func parseArgs(args []string) (*parsedArgs, error) {
@@ -203,6 +243,14 @@ func parseArgs(args []string) (*parsedArgs, error) {
 				p.layout = v
 				continue
 			}
+			if v, ok := flagValue(args, &i, "--format"); ok {
+				p.format = v
+				continue
+			}
+			if v, ok := flagValue(args, &i, "--output"); ok {
+				p.output = v
+				continue
+			}
 			return nil, fmt.Errorf("unknown option %q", a)
 		}
 	}
@@ -244,11 +292,15 @@ func Run(args []string, stdout io.Writer, stderr io.Writer, stdin io.Reader) int
 		return ExitUsage
 	}
 
-	if err := meta.Available(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return ExitNoExiftool
+	// find-duplicates is pure filesystem work and runs without ExifTool.
+	needsExiftool := cmd != "find-duplicates"
+	if needsExiftool {
+		if err := meta.Available(); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return ExitNoExiftool
+		}
+		meta.ConfigureJobs(p.g.Jobs)
 	}
-	meta.ConfigureJobs(p.g.Jobs)
 
 	// Buffer the hot per-file output: tens of thousands of small writes would
 	// otherwise cost one syscall each. confirm() flushes before blocking on
@@ -273,9 +325,27 @@ func Run(args []string, stdout io.Writer, stderr io.Writer, stdin io.Reader) int
 			layout: p.layout,
 			g:      p.g, clock: clock,
 		}, sum, bw)
+	case "find-duplicates":
+		format, ferr := inferDupFormat(p.output, p.format)
+		if ferr != nil {
+			fmt.Fprintf(stderr, "error: %v\n\n%s", ferr, usage)
+			return ExitUsage
+		}
+		code = runFindDuplicates(dupCfg{
+			root:   cleanPathArg(p.positional[0]),
+			format: format,
+			output: p.output,
+			g:      p.g,
+		}, bw)
 	default:
 		fmt.Fprintf(stderr, "error: unknown command %q\n\n%s", cmd, usage)
 		return ExitUsage
+	}
+
+	// find-duplicates renders its own summary/footer.
+	if cmd == "find-duplicates" {
+		_ = bw.Flush()
+		return code
 	}
 
 	fmt.Fprintln(bw, "")

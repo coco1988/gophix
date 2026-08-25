@@ -151,6 +151,10 @@ CLI controls:
 21. [x] Fix: description expectation used wrong `-G1` group (`EXIF:` vs `IFD0:`), forcing needless XMP fallback for every description-bearing file
 22. [x] Output hygiene: buffered stdout, all progress routed through the injected writer, `-q` on reads silences stay_open stderr chatter
 23. [x] `organize-by-year --layout yyyy|yyyy/mm|yyyy-mm|flat` (folder-structure option; default unchanged)
+24. [x] `find-duplicates`: report-only exact-duplicate detection (`--format text|csv|json`, `--output`),
+       size-prefiltered parallel hashing, deterministic keep suggestion, no ExifTool required
+25. [x] Fix organize-by-year concurrent-copy race (lost O_EXCL create race misreported as error and
+       deleted another worker's target; `os.IsExist` blind to `%w`-wrapped errors → `errors.Is(fs.ErrExist)`)
 
 ## Test matrix
 
@@ -218,6 +222,14 @@ checks (copies of real Takeout data): M1–M5.
 | L3 | flat: same-named files never overwrite; both survive | integration | `TestOrganize_FlatCollisionNeverOverwrites` |
 | L4 | Unknown/ placement independent of layout | integration | `TestOrganize_LayoutUnknownStillOptIn` |
 | L5 | Invalid layout value rejected with exit 2 | integration | `TestOrganize_LayoutInvalidValueRejected` |
+| D1 | Duplicate families detected across directories; unique files untouched | integration | `TestDupFind_FamiliesAcrossDirs` |
+| D2 | Equal size + different content never flagged (prefilter soundness) | integration | `TestDupFind_SizePrefilterSoundness` |
+| D3 | Keep suggestion: sidecar copy wins over shorter path; capture date shown | integration | `TestDupFind_RankingSidecarFirst` |
+| D4 | CSV and JSON reports written & parseable; format inferred from extension | integration | `TestDupFind_CSVAndJSONOutput` |
+| D5 | Unreadable file → warning, others processed, exit 1 | integration | `TestDupFind_UnreadableFileWarnsAndFails` (root-skipped) |
+| D6 | Empty tree → explicit note, exit 0 | integration | `TestDupFind_EmptyTree` |
+| D7 | Invalid `--format` rejected with exit 2 | integration | `TestDupFind_InvalidFormatRejected` |
+| R1 | Concurrent same-name organize copies never fail or lose data | stress | `TestOrganize_FlatCollisionNeverOverwrites -count=30` |
 
 ## Build / test / smoke commands
 
@@ -337,7 +349,11 @@ quality gates: gofmt clean, vet clean, go test ./... ok, build ok
 Bugs found & fixed while implementing this: Exec<->runExiftool mutual recursion (stack overflow in
 no-batch fallback), FileModifyDate append after slice assignment (silently dropped from write args),
 applyFS claiming success without writing when metadata was already satisfied but fsModInMain was set,
-organize move/skip-existing branch emptied by refactor, orgJob.matchVal never populated.
+organize move/skip-existing branch emptied by refactor, orgJob.matchVal never populated,
+organize concurrent same-name copies (worker losing an O_EXCL create race reported "file exists" as a
+processing error AND its cleanup deleted the winner's in-progress target; root cause: `os.IsExist`
+does not look through `fmt.Errorf("%w")` chains — replaced with `errors.Is(err, fs.ErrExist)` and
+race-safe re-classification retry; found via `-count=20` test stress).
 
 ## Known limitations
 
@@ -345,8 +361,8 @@ See PROJECT.md §"Verified remaining limitations" (kept in sync).
 
 ## Future work (parked ideas, not scheduled)
 
-- Duplicate finder: content-hash report of media appearing multiple times across album
-  directories (Takeout album membership commonly duplicates originals).
+- Duplicate finder: ~~content-hash report~~ **implemented as `find-duplicates`**; possible follow-ups:
+  `--delete` with keep-policy + confirmation, perceptual/`-edited` near-duplicate matching.
 - Include/exclude glob filters for `organize-by-year` to organize subsets without staging copies.
 - Summary export (`--report json|csv`) for large-run bookkeeping.
 - Day-level layout variant (`yyyy/mm/dd`) for `organize-by-year`.

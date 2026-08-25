@@ -3,8 +3,10 @@ package commands
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,14 +294,51 @@ func processOrgItem(job orgJob, cfg organizeCfg) orgResult {
 		return res
 	}
 
-	newHash, err := copyVerified(item.mediaPath, target)
-	if err != nil {
-		os.Remove(target)
-		res.errs = append(res.errs, err.Error())
+	// Copy with race-safe target creation: another worker may materialize
+	// the same destination name between our stat and our O_EXCL create.
+	// On a lost creation race we re-classify against the real file instead
+	// of failing - and never delete a file we do not own.
+	copied := false
+	for attempt := 0; attempt < 128; attempt++ {
+		if _, err := copyVerified(item.mediaPath, target); err != nil {
+			// Note: os.IsExist cannot see through %w-wrapped errors; use
+			// errors.Is against fs.ErrExist.
+			if !errors.Is(err, fs.ErrExist) {
+				// We created this (partial) file ourselves; clean it up.
+				os.Remove(target)
+				res.errs = append(res.errs, err.Error())
+				res.failed++
+				return res
+			}
+			// Target appeared meanwhile. Identical bytes -> nothing to add;
+			// different bytes -> derive the next collision name and retry.
+			if same, _ := sameContent(item.mediaPath, target); same {
+				res.skippedExisting++
+				return res
+			}
+			srcHash, herr := hashFile(item.mediaPath)
+			if herr != nil {
+				res.errs = append(res.errs, herr.Error())
+				res.failed++
+				return res
+			}
+			stem := strings.TrimSuffix(base, ext)
+			ts := "00000000T000000"
+			if resolved != nil {
+				ts = resolved.Instant.UTC().Format("20060102T150405")
+			}
+			base = fmt.Sprintf("%s-%s-%s_%d%s", stem, ts, shortHash(srcHash), attempt+1, ext)
+			target = filepath.Join(dir, base)
+			continue
+		}
+		copied = true
+		break
+	}
+	if !copied {
+		res.errs = append(res.errs, fmt.Sprintf("cannot place %s: collision naming exhausted", item.mediaPath))
 		res.failed++
 		return res
 	}
-	_ = newHash
 	res.copied++
 
 	sidecarCopies := 0
@@ -308,7 +347,11 @@ func processOrgItem(job orgJob, cfg organizeCfg) orgResult {
 		if _, err := os.Stat(xmpTarget); err == nil {
 			res.skippedExisting++
 		} else if _, err := copyVerified(item.xmpPath, xmpTarget); err != nil {
-			res.errs = append(res.errs, fmt.Sprintf("cannot copy XMP sidecar %s: %v", item.xmpPath, err))
+			if errors.Is(err, fs.ErrExist) { // concurrent job won the create race
+				res.skippedExisting++
+			} else {
+				res.errs = append(res.errs, fmt.Sprintf("cannot copy XMP sidecar %s: %v", item.xmpPath, err))
+			}
 		} else {
 			sidecarCopies++
 		}

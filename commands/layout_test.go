@@ -63,14 +63,16 @@ func TestOrganize_FlatCollisionNeverOverwrites(t *testing.T) {
 	dir := t.TempDir()
 	name := "IMG_20150601_120000.jpg"
 
-	writeJPEG(t, filepath.Join(dir, name))
+	mustWriteFile(t, filepath.Join(dir, name), writeJPEGBytes(t, 200, 10, 10))
 	sidecar(t, dir, name, tsMarch2019, "", 0, 0, "")
 
 	sub := filepath.Join(dir, "sub")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeJPEG(t, filepath.Join(sub, name))                  // identical stem in another album dir
+	// Distinct bytes are essential here: identical content could legitimately
+	// be skipped as already-present instead of colliding.
+	mustWriteFile(t, filepath.Join(sub, name), writeJPEGBytes(t, 10, 200, 10))
 	sidecar(t, sub, name, tsBerlinNoonWinter, "", 0, 0, "") // different capture time
 
 	dst := filepath.Join(t.TempDir(), "out")

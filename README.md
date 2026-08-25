@@ -108,12 +108,13 @@ go build -o gophix.exe .
 gophix fix [options] <takeout-media-root>
 gophix clean-json [options] <takeout-media-root>
 gophix organize-by-year [options] <source-path> <destination-path>
+gophix find-duplicates [options] <takeout-media-root>
 ```
 
 Common options: `--dry-run`, `--verbose`, `--timezone <IANA-zone|+HH:MM>`, `--force-json-time`,
 `--time-policy preserve-existing|prefer-json|json-only` (default `preserve-existing`),
 `--no-filename-fallback`, `--assume-noon-for-date-only`; organize adds `--move`, `--include-unknown-date`,
-`--keep-json`, `--layout`; clean-json adds `--yes`.
+`--keep-json`, `--layout`; clean-json adds `--yes`; find-duplicates adds `--format`, `--output`.
 
 ### organize-by-year: folder layouts
 
@@ -131,6 +132,26 @@ Layout-independent behavior: files without a usable capture date are skipped unl
 `--include-unknown-date` places them in `Unknown/`; name collisions are resolved deterministically
 (the same final name is shared by media, `.xmp` and optional JSON sidecars); nothing is ever
 overwritten.
+
+### find-duplicates
+
+Google Photos albums are labels, not folders: a Takeout export contains a **full byte copy** of every
+album member inside each album directory. `find-duplicates` reports those exact duplicates — it is a
+report only, nothing is ever deleted or modified.
+
+```bash
+./gophix find-duplicates "/data/Takeout"                    # human-readable report to stdout
+./gophix find-duplicates --output dupes.csv "/data/Takeout" # format inferred from extension
+./gophix find-duplicates --format json --output - "/data/Takeout"
+```
+
+- Hashing runs only on files whose byte size collides with another file (most of a large library is
+  skipped). Requires no ExifTool.
+- Each family lists all copies with a ★ keep suggestion (copy with sidecar first, then shorter path).
+- Exit code stays `0` when duplicates are found; `1` only for processing errors (unreadable files).
+
+Suggested workflow: `fix` → `find-duplicates` → `organize-by-year`, so redundant copies are known
+before organizing.
 
 Safe examples (Linux):
 

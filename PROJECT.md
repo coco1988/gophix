@@ -45,6 +45,7 @@ commands/
   fix.go                 fix command (+ shared directory walker)
   cleanjson.go           clean-json command
   organize.go            organize-by-year command
+  dupfind.go             find-duplicates command (report-only, no ExifTool)
   extfix.go              media extension correction via ExifTool detection
 report/summary.go        counters, warnings/errors collection, summary printing
 ```
@@ -182,11 +183,15 @@ gophix organize-by-year [--dry-run] [--verbose] [--move] [--include-unknown-date
                         [--assume-noon-for-date-only]
                         [--layout yyyy|yyyy/mm|yyyy-mm|flat] <source-path> <destination-path>
 
+gophix find-duplicates [--format text|csv|json] [--output <file>|-] [--verbose]
+                       <takeout-media-root>
+
 gophix version | help
 ```
 
-Exit codes: `0` success (warnings allowed) · `1` at least one processing error · `2` usage error ·
-`3` ExifTool not found (message includes install hint).
+Exit codes: `0` success (warnings allowed; for `find-duplicates` also "duplicates found") ·
+`1` at least one processing error · `2` usage error · `3` ExifTool not found
+(`find-duplicates` never requires ExifTool and can therefore not exit `3`).
 
 Path arguments are sanitized: stray quotes and trailing separators produced by Windows PowerShell
 quoting (`'C:\dir\'` → received as `C:\dir"`) are repaired before use.
@@ -214,6 +219,14 @@ An empty tree prints an explicit "nothing to do" note (not a false success).
   `yyyy-mm` → `<dst>/2020-12/f.jpg`; `flat` → `<dst>/f.jpg`. Invalid values are rejected at
   argument-parse time (exit code 2). Collision handling, Unknown placement, copy/move semantics and
   sidecar naming are identical across layouts.
+- `find-duplicates`: report only — never deletes, moves or modifies anything. Scans with the same
+  media detection as the other commands, hashes only files whose byte size collides with at least one
+  other file (streaming SHA-256, parallel workers), and groups equal digests into families. Each
+  family carries a deterministic keep suggestion (copy with matched sidecar first, then shorter path,
+  then lexicographic) marked ★; the suggestion is advisory. Reports render as text (default), CSV
+  (`hash,path,bytes,is_keep,has_sidecar,capture_date`) or JSON (summary + families); `--output`
+  infers the format from the file extension unless `--format` overrides it. Exact byte duplicates
+  only — `-edited` variants or perceptual near-duplicates are out of scope.
 - Extension fixing may rename media (`png` masquerading as `jpg`); association survives across runs via
   the reverse-renamed matching rule.
 
