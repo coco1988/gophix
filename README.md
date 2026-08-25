@@ -1,91 +1,66 @@
 # gophix
 
-A simple tool to merge Google Photos Takeout json metadata with the media files themselves. This works with both photos
-and videos.
+Restores original metadata (capture date, GPS, description) from Google Photos Takeout JSON
+sidecars into your photos and videos, removes duplicate album copies, and organizes everything
+into year folders — so file browsers and gallery apps sort correctly again.
 
-This works with all the media formats compatible with [Phil Harvey's ExifTool](https://exiftool.org). If the format is
-not supported, gophix will write the metadata in a xmp sidecar file.
+> ⚠️ **Always work on a copy of your Takeout export.**
 
-## Features
+## The workflow
 
-- Merges media creation date, GPS coordinates, and description from json files with the media files
-- Fixes media file extensions if necessary (for example png files with a jpg extension)
-- Works with any media format (although some formats require a sidecar file)
-- Cleans up the json files
-
-## Motivation
-
-Before I built this, I looked for an existing tool that could do this, but I couldn't find one that satisfied all my
-needs. Some of the issues I had with existing tools were:
-
-- They did not work with all the quirky json file names that Google Photos Takeout generates
-- They were prioritizing the metadata from the media file itself over the metadata from the json file
-- They were not merging the GPS metadata or the description from the json file with the media
-- They did not work with videos
-
-## Usage
-
-First, download your [Google Photos Takeout](http://takeout.google.com) archive and extract it. You should have a folder
-with the following structure:
-
-```
-Takeout/
-  Google Photos/
-    Photos of 2001/
-      IMG_0001.jpg
-      IMG_0001.json
-      IMG_0002.jpg
-      IMG_0002.json
-    Photos of 2002/
-      IMG_0003.jpg
-      IMG_0003.json
-      IMG_0004.jpg
-      IMG_0004.json
+```bash
+gophix run 'Takeout' 'Organized'
 ```
 
-gophix supports 2 operations: `fix` and `clean-json`.
+That single command performs the three steps:
 
-### fix
+| Step | What happens |
+|---|---|
+| **1/3 deduplicate** | Albums duplicate photos byte-for-byte. Exact copies are found (SHA-256); surplus copies are removed — never the suggested keeper. Asks `[y/N]`; add `--yes` for scripts, `--dry-run` plans only. |
+| **2/3 correct dates** | The photo's own capture date wins. If it has none, the JSON sidecar date is used (with `--timezone` applied when given). Filename patterns (`IMG_20201206_142433.jpg`, WhatsApp, …) are the last resort. GPS is filled from JSON only when the photo has none — existing GPS is never overwritten. Filesystem modification time follows the chosen date. |
+| **3/3 restructure** | Media is **copied** into `Organized/YYYY/` (sources stay untouched). Undated files are reported; `--include-unknown-date` places them under `Unknown/`. Name collisions get deterministic suffixed names shared with their sidecars; nothing is ever overwritten. |
 
-To fix the files and merge the metadata, run the following command:
+Every step also works alone:
 
-```shell
-gophix fix <path>
+```
+gophix find-duplicates [--delete] <root>
+gophix fix [options] <takeout-media-root>
+gophix organize-by-year [options] <source> <destination>
+gophix clean-json [--yes] <root>        # optional step 4: delete sidecars of verified-repaired media
 ```
 
-Where `<path>` is the path to the `Takeout/Google Photos` folder. For example:
+## Options
 
-```shell
-gophix fix ~/Downloads/Takeout/Google\ Photos
+| Option | Effect |
+|---|---|
+| `--dry-run` / `--verbose` | Plan without writing · detailed per-file output |
+| `--timezone <IANA-zone\|±HH:MM>` | Optional precision for JSON/filename dates, e.g. `Europe/Berlin`. Photo-embedded dates are used exactly as they are. |
+| `--layout yyyy\|yyyy/mm\|yyyy-mm\|flat` | Folder structure (default `yyyy`) |
+| `--move` | organize: move instead of copy (sources deleted only after byte-verified copy) |
+| `--include-unknown-date`, `--keep-json` | organize extras |
+| `--delete`, `--yes` | find-duplicates removal controls |
+| `--format text\|csv\|json`, `--output <file>` | duplicate report format/destination |
+| `--jobs <N>` | Parallel ExifTool workers (default: CPU count, max 8) |
+
+Sidecar naming: current `<media>.supplemental-metadata.json` (incl. truncated variants) plus legacy
+`<media>.json` / `<basename>.json`. Album-level files (`metadata.json`, `Metadaten.json`, …) are
+never matched, modified, or deleted. Private Google data (account IDs, people labels, URLs) is
+never transferred.
+
+Exit codes: `0` success · `1` processing errors · `2` usage error · `3` ExifTool missing
+(`find-duplicates` needs no ExifTool).
+
+Performance: persistent ExifTool processes + parallel workers ≈ 20x faster than process-per-call;
+25,000 photos in roughly 10–15 minutes.
+
+## Install
+
+Linux (Debian/Ubuntu):
+
+```bash
+sudo apt install -y golang-go git-all build-essential libimage-exiftool-perl
+git clone https://github.com/coco1988/gophix.git && cd gophix && go build -o gophix .
 ```
 
-**Note** the backslash before the space in the path. This is necessary because the shell interprets the space as a
-separator between arguments.
-
-Optionally, you can save the output logs to a file:
-
-```shell
-gophix fix <path> | tee logs.txt
-```
-
-### clean-json
-
-To clean up the json files (potentially after running `fix`), run the following command:
-
-```shell
-gophix clean-json <path>
-```
-
-## Build
-
-```shell
-go build -o gophix
-```
-
-## To do
-
-- [ ] Make it idempotent (right now it cannot find the associated json files after fixing file extensions)
-    - Could be fixed by keeping state of the renamed files in an additional json file
-- [ ] Release binaries
-- [ ] Add timezone offset to the metadata
-    - Could be computed using the GPS coordinates if present
+Windows/macOS: install [Go](https://go.dev) + [ExifTool](https://exiftool.org), then
+`go build -o gophix.exe .`
