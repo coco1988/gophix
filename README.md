@@ -6,55 +6,145 @@ into year folders — so file browsers and gallery apps sort correctly again.
 
 > ⚠️ **Always work on a copy of your Takeout export.**
 
-## The workflow
+---
+
+## Step-by-step manual
+
+Two ways to drive gophix — pick whichever fits:
+
+- **Step by step** (Steps 1–4 below): full control, inspect between stages.
+- **One stop**: `gophix run "Takeout-work" "Organized"` executes dedupe → repair → organize in
+  sequence with the same safety rules (see "All three steps in one command" at the end).
+
+### Step 0 — Prepare
+
+1. Extract your Google Takeout zip.
+2. Make a working copy and never touch the original:
 
 ```bash
-gophix run 'Takeout' 'Organized'
+# Linux/macOS                      # Windows (PowerShell)
+cp -r Takeout Takeout-work         Copy-Item -Recurse Takeout Takeout-work
 ```
 
-That single command performs the three steps:
+All following commands run against `Takeout-work` (adjust the paths to yours).
 
-| Step | What happens |
-|---|---|
-| **1/3 deduplicate** | Albums duplicate photos byte-for-byte. Exact copies are found (SHA-256); surplus copies are removed — never the suggested keeper. Asks `[y/N]`; add `--yes` for scripts, `--dry-run` plans only. |
-| **2/3 correct dates** | The photo's own capture date wins. If it has none, the JSON sidecar date is used (with `--timezone` applied when given). Filename patterns (`IMG_20201206_142433.jpg`, WhatsApp, …) are the last resort. GPS is filled from JSON only when the photo has none — existing GPS is never overwritten. Filesystem modification time follows the chosen date. |
-| **3/3 restructure** | Media is **copied** into `Organized/YYYY/` (sources stay untouched). Undated files are reported; `--include-unknown-date` places them under `Unknown/`. Name collisions get deterministic suffixed names shared with their sidecars; nothing is ever overwritten. |
+---
 
-Every step also works alone:
+### Step 1 — Remove duplicate album copies
 
-```
-gophix find-duplicates [--delete] <root>
-gophix fix [options] <takeout-media-root>
-gophix organize-by-year [options] <source> <destination>
-gophix clean-json [--yes] <root>        # optional step 4: delete sidecars of verified-repaired media
+Google albums are labels, not folders: every album member is exported as a **full byte copy**
+inside each album directory. Remove the surplus copies *before* repairing, while they are still
+byte-identical.
+
+```bash
+gophix find-duplicates --dry-run "Takeout-work"        # 1a: preview what would go
+gophix find-duplicates --delete --yes "Takeout-work"   # 1b: remove them
 ```
 
-Problem cases (unreadable media, invalid sidecars, write failures) can be isolated during `fix`:
-`--failed-dir <folder>` copies them — with their sidecar — into one place for inspection; add
-`--failed-move` to relocate instead. The run continues, the summary counts them, and the exit code
-stays `1` so scripts notice.
+What happens: files with identical SHA-256 form families; each family keeps exactly one copy
+(★ suggested keeper), the rest are deleted. Nothing else is touched. Without `--delete` this is
+report-only; without `--yes` it asks `[y/N]`.
 
-## Options
+---
+
+### Step 2 — Repair dates, GPS and descriptions
+
+```bash
+gophix fix --dry-run --verbose "Takeout-work/Google Fotos"   # 2a: preview (writes nothing)
+gophix fix "Takeout-work/Google Fotos"                       # 2b: repair
+```
+
+Which date wins (in order):
+
+1. **The photo's own capture date** — used as-is, never rewritten.
+2. The JSON sidecar date (`photoTakenTime`) if the photo has none — add `--timezone Europe/Berlin`
+   for correct local times and offset tags (optional but recommended for your home region).
+3. Filename patterns like `IMG_20201206_142433.jpg` — last resort only.
+
+Also done automatically: GPS filled from JSON **only when missing**, description/title copied,
+wrong extensions fixed (`.png` pretending to be `.jpg`), filesystem modification/creation times set
+so Explorer and galleries sort correctly.
+
+Notes: `fix` is idempotent — rerunning reports `already correct` and touches nothing.
+Undated photos are reported as `undated (left untouched)` — they stay where they are.
+Problem cases can be isolated instead of blocking the run:
+`--failed-dir "errors"` copies failed files (with sidecar) aside, `--failed-move` moves them.
+
+Verify any result independently:
+
+```bash
+exiftool -time:all -gps:all "Takeout-work/Google Fotos/Fotos von 2022/IMG_xxxx.jpg"
+```
+
+---
+
+### Step 3 — Organize into year folders
+
+```bash
+gophix organize-by-year "Takeout-work" "Organized"
+```
+
+Copies (never moves by default) every dated photo/video into `Organized/YYYY/`, e.g.
+`Organized/2022/IMG_20220814_153000.jpg`. Sources stay untouched, nothing is ever overwritten;
+name collisions get deterministic suffixed names shared by media + sidecars.
+
+Variants:
+
+```bash
+--layout yyyy/mm          # 2022/08/…        --layout yyyy-mm   # 2022-08/…
+--layout flat             # all directly in Organized/
+--move                    # move instead of copy (sources deleted after verified copy)
+--include-unknown-date    # undated media go to Organized/Unknown/ instead of being skipped
+```
+
+---
+
+### Step 4 (optional) — Delete the used-up JSON sidecars
+
+Only sidecars whose media verified fully repaired are eligible; album metadata
+(`Metadaten.json`, …) always survives.
+
+```bash
+gophix clean-json --dry-run "Takeout-work"     # inspect first
+gophix clean-json --yes "Takeout-work"
+```
+
+---
+
+## All three steps in one command
+
+Prefer letting gophix do the sequence? This runs dedupe → repair → organize:
+
+```bash
+gophix run --yes "Takeout-work" "Organized"
+```
+
+(`--yes` approves the step-1 deletions; `--dry-run` plans the whole pipeline; `--timezone`,
+`--layout`, `--include-unknown-date`, `--keep-json`, `--failed-dir` pass through to the steps.)
+
+---
+
+## Options reference
 
 | Option | Effect |
 |---|---|
 | `--dry-run` / `--verbose` | Plan without writing · detailed per-file output |
-| `--timezone <IANA-zone\|±HH:MM>` | Optional precision for JSON/filename dates, e.g. `Europe/Berlin`. Photo-embedded dates are used exactly as they are. |
+| `--timezone <IANA-zone\|±HH:MM>` | Precision for JSON/filename dates, e.g. `Europe/Berlin` |
 | `--layout yyyy\|yyyy/mm\|yyyy-mm\|flat` | Folder structure (default `yyyy`) |
-| `--move` | organize: move instead of copy (sources deleted only after byte-verified copy) |
+| `--move` | organize: move instead of copy |
 | `--include-unknown-date`, `--keep-json` | organize extras |
-| `--delete`, `--yes` | find-duplicates removal controls |
-| `--failed-dir <folder>` (+ `--failed-move`) | fix/run: isolate files whose processing failed into this folder (with their sidecar) — copy by default, move with the flag. Never overwrites; undated-but-valid media is not quarantined. |
+| `--delete`, `--yes` | duplicate removal controls |
+| `--failed-dir <folder>`, `--failed-move` | isolate processing failures |
 | `--format text\|csv\|json`, `--output <file>` | duplicate report format/destination |
 | `--jobs <N>` | Parallel ExifTool workers (default: CPU count, max 8) |
 
-Sidecar naming: current `<media>.supplemental-metadata.json` (incl. truncated variants) plus legacy
-`<media>.json` / `<basename>.json`. Album-level files (`metadata.json`, `Metadaten.json`, …) are
-never matched, modified, or deleted. Private Google data (account IDs, people labels, URLs) is
-never transferred.
-
 Exit codes: `0` success · `1` processing errors · `2` usage error · `3` ExifTool missing
 (`find-duplicates` needs no ExifTool).
+
+Sidecar naming handled: `<media>.supplemental-metadata.json` (current, incl. truncated variants),
+`<media>.json`, `<basename>.json` (legacy) plus recovery heuristics. Album-level files
+(`metadata.json`, `Metadaten.json`, …) are never matched, modified, or deleted. Private Google data
+(account IDs, people labels, URLs) is never transferred.
 
 Performance: persistent ExifTool processes + parallel workers ≈ 20x faster than process-per-call;
 25,000 photos in roughly 10–15 minutes.
