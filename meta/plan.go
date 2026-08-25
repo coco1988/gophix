@@ -185,11 +185,12 @@ func (p *Plan) buildArgs() {
 		}
 	}
 
-	if full && r.Offset != nil {
-		// Filesystem dates are only synced when the wall clock carries a real
-		// offset (--timezone applied to a JSON/filename date). Naive dates
-		// would shift displayed times by the local offset - leave them alone.
-		p.fsWant = FileTS(r.Wall)
+	if full {
+		// Filesystem dates ALWAYS follow the chosen date so Explorer/gallery
+		// sorting is repaired. Naive wall clocks are interpreted in the
+		// effective timezone (machine locale unless --timezone was given),
+		// so Explorer shows exactly the camera's clock digits.
+		p.fsWant = FileTS(r.FSTime)
 		p.wantFS = true
 		a = append(a, "-FileModifyDate="+p.fsWant)
 		p.fsModInMain = true

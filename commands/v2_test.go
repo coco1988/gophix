@@ -278,3 +278,26 @@ func TestV2_RunPipeline(t *testing.T) {
 		t.Fatalf("duplicate album copy should be deleted by step 1\noutput:\n%s", out)
 	}
 }
+
+// Regression: filesystem dates (what Explorer shows) must be repaired even
+// when no --timezone is given and the date came from the embedded EXIF.
+func TestV2_FSDatesSetWithoutTimezone(t *testing.T) {
+	hasExiftool(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "IMG_20050505_050505.jpg")
+	v2writeJPEG(t, p)
+	v2sidecar(t, dir, "IMG_20050505_050505.jpg", "1120513505") // 2005-07-02T02:45:05Z
+
+	code, out := run(t, "", "fix", dir) // NO --timezone
+	requireOK(t, out, code)
+
+	i := readInfoStr(t, p)
+	fm, ok := i["System:FileModifyDate"]
+	if !ok || fm == "" {
+		t.Fatalf("FileModifyDate must be set without --timezone: %+v\noutput:\n%s", i, out)
+	}
+	// Wall clock written as UTC digits (no zone known); FS shows same digits.
+	if i["ExifIFD:DateTimeOriginal"] != "2005:07:04 21:45:05" {
+		t.Fatalf("unexpected DO: %q", i["ExifIFD:DateTimeOriginal"])
+	}
+}

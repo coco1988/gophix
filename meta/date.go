@@ -31,11 +31,22 @@ const (
 
 // DateResult is the resolved capture date of one file.
 type DateResult struct {
-	Source   string
-	Wall     time.Time // wall clock to write into EXIF date fields
-	Offset   *string   // "+01:00" when known (--timezone applied to a JSON/filename date)
-	Instant  time.Time // absolute instant for filesystem/GPS purposes
-	DateOnly bool      // filename matched a date only: year organization, no time invented
+	Source  string
+	Wall    time.Time // wall clock to write into EXIF date fields
+	Offset  *string   // "+01:00" when known (--timezone applied to a JSON/filename date)
+	Instant time.Time // absolute instant (UTC) for GPS purposes
+	FSTime  time.Time // absolute instant for filesystem dates (Wall interpreted
+	// in the effective timezone; naive dates use the machine
+	// locale so Explorer shows the camera's clock digits)
+	DateOnly bool // filename matched a date only: year organization, no time invented
+}
+
+// effectiveZone returns the explicit --timezone or the machine locale.
+func effectiveZone(zone *time.Location) *time.Location {
+	if zone != nil {
+		return zone
+	}
+	return time.Local
 }
 
 // ResolveDate applies the v2 rule and reports which source won.
@@ -46,10 +57,13 @@ func ResolveDate(info Info, taken *int64, fname *FileNameDate, zone *time.Locati
 	for _, key := range []string{"ExifIFD:DateTimeOriginal", "ExifIFD:CreateDate", "XMP-exif:DateTimeOriginal"} {
 		if raw, ok := info.Str(key); ok {
 			if t, err := time.Parse(exifLayout, raw); err == nil && saneYear(t.Year()) {
+				eff := effectiveZone(zone)
+				local := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, eff)
 				return &DateResult{
 					Source:  SrcEmbedded,
-					Wall:    t,
-					Instant: time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.UTC),
+					Wall:    t,           // naive digits, written back exactly as found
+					Instant: local.UTC(), // best-estimate instant for GPS purposes
+					FSTime:  local,       // Explorer sees the camera's clock digits
 				}, true
 			}
 		}
@@ -66,6 +80,7 @@ func ResolveDate(info Info, taken *int64, fname *FileNameDate, zone *time.Locati
 			r.Wall = instant
 		}
 		r.Instant = instant
+		r.FSTime = instant
 		return r, true
 	}
 
@@ -79,12 +94,13 @@ func ResolveDate(info Info, taken *int64, fname *FileNameDate, zone *time.Locati
 				DateOnly: true,
 			}, true
 		}
-		r := &DateResult{Source: SrcFilename}
+		r := &DateResult{Source: SrcFilename, FSTime: fname.Wall.In(effectiveZone(zone))}
 		if zone != nil {
 			y, mo, d := fname.Wall.Date()
 			h, mi, s := fname.Wall.Clock()
 			r.Wall = time.Date(y, mo, d, h, mi, s, 0, zone)
 			r.Instant = r.Wall.UTC()
+			r.FSTime = r.Wall
 			off := FormatOffset(r.Wall)
 			r.Offset = &off
 		} else {
