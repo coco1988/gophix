@@ -342,3 +342,11 @@ organize move/skip-existing branch emptied by refactor, orgJob.matchVal never po
 ## Known limitations
 
 See PROJECT.md §"Verified remaining limitations" (kept in sync).
+
+## Future work (parked ideas, not scheduled)
+
+- Duplicate finder: content-hash report of media appearing multiple times across album
+  directories (Takeout album membership commonly duplicates originals).
+- Include/exclude glob filters for `organize-by-year` to organize subsets without staging copies.
+- Summary export (`--report json|csv`) for large-run bookkeeping.
+- Day-level layout variant (`yyyy/mm/dd`) for `organize-by-year`.
