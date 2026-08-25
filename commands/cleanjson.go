@@ -180,7 +180,16 @@ func verifySidecarDeletable(mediaPath, sidecarPath string, clock *meta.Clock) st
 	return ""
 }
 
+// confirm asks the user to approve an action. It refuses cleanly (with
+// actionable guidance) when stdin cannot provide an answer — e.g. inside
+// PowerShell ISE, VS Code debug consoles, or any wrapper that closes stdin.
 func confirm(stdin io.Reader, stdout io.Writer, action string) (bool, error) {
+	if stdin == os.Stdin {
+		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+			return false, fmt.Errorf(
+				"stdin is not interactive (no terminal attached); re-run with --yes to skip the confirmation")
+		}
+	}
 	if f, ok := stdout.(interface{ Flush() error }); ok {
 		_ = f.Flush() // make buffered prompts visible before blocking on stdin
 	}
@@ -188,7 +197,8 @@ func confirm(stdin io.Reader, stdout io.Writer, action string) (bool, error) {
 	fmt.Fprintf(stdout, "Really %s? [y/N] ", action)
 	line, err := r.ReadString('\n')
 	if err != nil && line == "" {
-		return false, fmt.Errorf("no interactive confirmation possible")
+		return false, fmt.Errorf(
+			"no interactive confirmation possible (%v); re-run with --yes to skip the prompt", err)
 	}
 	ans := strings.ToLower(strings.TrimSpace(line))
 	return ans == "y" || ans == "yes", nil
