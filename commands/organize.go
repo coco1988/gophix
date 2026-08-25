@@ -81,6 +81,8 @@ func runOrganize(cfg organizeCfg, sum *report.Summary, stdout io.Writer) int {
 	var jobs []orgJob
 	err := walkDirs(cfg.src, func(dc *dirContext) error {
 		sum.DirsScanned++
+		fmt.Fprintf(stdout, "📓 scanning %s\n", dc.path)
+		flushIfBuffered(stdout)
 		cls := dc.matcher.Classify()
 		for _, mediaName := range cls.Media {
 			sum.MediaFound++
@@ -110,9 +112,21 @@ func runOrganize(cfg organizeCfg, sum *report.Summary, stdout io.Writer) int {
 		jobs[i].cur, jobs[i].readErr = infos[i], fails[i]
 	}
 
+	if len(jobs) > 0 {
+		fmt.Fprintf(stdout, "⏳ organizing %d files…\n", len(jobs))
+		flushIfBuffered(stdout)
+	}
+	var done int
 	runPool(len(jobs),
 		func(i int) orgResult { return processOrgItem(jobs[i], cfg) },
-		func(r orgResult) { collectOrgResult(r, cfg, sum, stdout) })
+		func(r orgResult) {
+			done++
+			if done%250 == 0 && done < len(jobs) {
+				fmt.Fprintf(stdout, "⏳ processed %d / %d files…\n", done, len(jobs))
+				flushIfBuffered(stdout)
+			}
+			collectOrgResult(r, cfg, sum, stdout)
+		})
 
 	if sum.HasErrors() {
 		return ExitErrors

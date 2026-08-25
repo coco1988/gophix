@@ -87,6 +87,8 @@ gophix organize-by-year "Takeout-work" "Organized"
 Copies (never moves by default) every dated photo/video into `Organized/YYYY/`, e.g.
 `Organized/2022/IMG_20220814_153000.jpg`. Sources stay untouched, nothing is ever overwritten;
 name collisions get deterministic suffixed names shared by media + sidecars.
+Progress is visible throughout: scanned directories and a `⏳ processed N / M files…`
+counter while copying.
 
 Variants:
 
