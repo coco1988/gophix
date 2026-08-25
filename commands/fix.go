@@ -280,7 +280,11 @@ func collectFixResult(res fixResult, sum *report.Summary, stdout io.Writer, g *g
 		sum.Warnf("%s: %s", base, w)
 	}
 	if res.renameLine != "" {
-		fmt.Fprintf(stdout, "🔄 renamed %s\n", res.renameLine)
+		if g.DryRun {
+			fmt.Fprintf(stdout, "🔁 [dry-run] would rename %s\n", res.renameLine)
+		} else {
+			fmt.Fprintf(stdout, "🔄 renamed %s\n", res.renameLine)
+		}
 	}
 
 	switch {

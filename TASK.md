@@ -155,6 +155,10 @@ CLI controls:
        size-prefiltered parallel hashing, deterministic keep suggestion, no ExifTool required
 25. [x] Fix organize-by-year concurrent-copy race (lost O_EXCL create race misreported as error and
        deleted another worker's target; `os.IsExist` blind to `%w`-wrapped errors → `errors.Is(fs.ErrExist)`)
+26. [x] Documentation pass: README gained a fully executed walkthrough (demo fixture under `~/gophix-demo`,
+       every output block captured from real runs), per-option examples for all four commands, expanded
+       Windows section; PROJECT.md gained worked matching + timezone examples; dry-run rename line now
+       worded as "would rename" (was past tense during dry-run)
 
 ## Test matrix
 

@@ -42,7 +42,7 @@ func fixExtensionFromInfo(mediaPath string, info meta.Info, opts *globalOpts, st
 	base := strings.TrimSuffix(mediaPath, currentExt)
 	target := uniqueName(base + newExt)
 	if opts.DryRun {
-		fmt.Fprintf(stdout, "🔁 [dry-run] would rename %s -> %s\n", filepath.Base(mediaPath), filepath.Base(target))
+		// No print here: the collector reports the planned rename uniformly.
 		return mediaPath, target, ""
 	}
 	if err := os.Rename(mediaPath, target); err != nil {

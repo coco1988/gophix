@@ -81,6 +81,18 @@ Never matched (hard exclusions, case-insensitive): `metadata.json`, `metadaten.j
 `shared_album_comments.json`; plus any JSON not derived from a media filename. Junk files
 (`Thumbs.db`, `desktop.ini`, `.DS_Store`) and `.xmp` files are ignored during classification.
 
+Worked example — directory listing:
+
+```text
+IMG_20220814_153000.jpg
+IMG_20220814_153000.jpg.supplemental-metadata.json   ← priority 1 for IMG_20220814_153000.jpg
+IMG_20190301_104500.jpg
+IMG_20190301_104500.json                            ← priority 9 (<basename>.json) for IMG_20190301_104500.jpg
+P1010001.jpg
+P1010001.jpg.supplemental-metadat.json              ← priority 2 (truncated) for P1010001.jpg, warns
+Metadaten.json                                      ← excluded for everyone
+```
+
 ## Takeout JSON model
 
 ```go
@@ -132,6 +144,21 @@ See TASK.md §"Timezone and timestamp policy" (binding spec). Summary of impleme
   QuickTime tags without timezone conversion; gophix feeds the UTC clock digits directly.
 - `FileModifyDate` = resolved instant with offset; `FileCreateDate` attempted separately so unsupported
   platforms report cleanly without failing the repair. `FileAccessDate` is never touched.
+
+Worked example (real run, `--timezone Europe/Berlin`, JSON `photoTakenTime.timestamp = "1660486200"`):
+
+```text
+JSON instant            2022-08-14T14:10:00Z   (no embedded offset present)
+resolved local          2022-08-14 16:10:00 +02:00        (Europe/Berlin, CEST summer time)
+written image tags      DateTimeOriginal/CreateDate/ModifyDate = 2022:08:14 16:10:00
+                        OffsetTimeOriginal/Digitized/Offset    = +02:00     (no Z suffix)
+written GPS tags        GPSDateStamp = 2022:08:14, GPSTimeStamp = 14:10:00  (always UTC)
+written filesystem      FileModifyDate = 2022:08:14 16:10:00+02:00          (same instant)
+winter counterpart      same instant in January would resolve to +01:00 (CET) — historical DST applies
+```
+
+The same JSON without `--timezone` and without any embedded offset keeps UTC clock digits and emits
+the documented warning instead of inventing an offset.
 
 ### Filename timestamp fallback
 

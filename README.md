@@ -102,6 +102,199 @@ go build -o gophix.exe .
 > it into a stray quote for native programs. gophix auto-repairs this, but the clean form is
 > `'...\Fotos von 2015'`.
 
+## Complete walkthrough (with real output)
+
+Every example below was executed against exactly this small demo export; the outputs are gophix's
+real ones. Reproduce it anytime — commands are copy-paste ready.
+
+Demo tree:
+
+```
+~/gophix-demo/Takeout/
+├── Google Fotos/
+│   ├── IMG_20220814_153000.jpg                        + .supplemental-metadata.json (GPS Rom, Beschreibung)
+│   ├── IMG_20190301_104500.jpg                        + IMG_20190301_104500.json    (legacy sidecar name)
+│   ├── IMG_20210102_030405.jpg                        ← PNG data, wrong extension, NO sidecar
+│   └── Metadaten.json                                 ← album metadata, must never be touched
+└── Album Italien 2022/
+    └── P1010001.jpg                                   ← byte copy of the Rome photo (+ own sidecar)
+```
+
+### Step 0 — always start from a copy
+
+```bash
+cp -r ~/Takeout ~/Takeout-original-backup    # keep an untouched original somewhere safe
+```
+
+### Step 1 — check for duplicates *before* repairing
+
+Albums duplicate photos byte-for-byte; hashing is cheapest while copies are still identical.
+
+```bash
+./gophix find-duplicates ~/gophix-demo/Takeout
+```
+
+```text
+1 duplicate families found:
+
+── family 1/1 · sha256 38212e… · 2 copies · 642 B each
+ ★ KEEP ~/gophix-demo/Takeout/Album Italien 2022/P1010001.jpg (sidecar, taken 2022-08-14)
+        ~/gophix-demo/Takeout/Google Fotos/IMG_20220814_153000.jpg (sidecar, taken 2022-08-14)
+
+This is a report only - nothing was deleted or modified.
+1 duplicate families: 1 redundant copies, 642 B reclaimable (4 files in 3 directories, 2 hashed, 2 skipped by unique size) - report above
+```
+
+The ★ suggestion is advisory. Delete surplus copies yourself if you want (report-only is a design
+decision), or just leave them — `organize-by-year` never overwrites either way.
+
+### Step 2 — plan the repair (nothing is written)
+
+```bash
+./gophix fix --dry-run --verbose --timezone Europe/Berlin "$HOME/gophix-demo/Takeout/Google Fotos"
+```
+
+```text
+📓 processing ~/gophix-demo/Takeout/Google Fotos
+   • IMG_20190301_104500.jpg: planned (dry-run) [date source: json-photoTakenTime]
+🔁 [dry-run] would rename IMG_20210102_030405.jpg -> IMG_20210102_030405.png
+   • IMG_20210102_030405.jpg: planned (dry-run) [pattern: IMG_YYYYMMDD_HHMMSS] [date source: filename-date-time]
+   • IMG_20220814_153000.jpg: planned (dry-run) [date source: json-photoTakenTime]
+   ℹ️  IMG_20220814_153000.jpg: not transferred (no safe standard mapping): geoData.latitudeSpan, geoData.longitudeSpan
+
+📋 summary
+   directories scanned:      1
+   media files found:         3
+   updated directly:          0
+   XMP sidecars written:      0
+   already correct:           0
+   skipped without sidecar:   1
+   failed:                    0
+   warnings:                  0
+   errors:                    0
+result: completed
+```
+
+Read: both JSON-backed photos will be repaired from their sidecars; the extension-less PNG gets its
+name fixed and its date from the filename pattern; `Metadaten.json` is not even counted as media.
+
+### Step 3 — run the repair
+
+```bash
+./gophix fix --timezone Europe/Berlin "$HOME/gophix-demo/Takeout/Google Fotos"
+```
+
+```text
+📓 processing ~/gophix-demo/Takeout/Google Fotos
+🔄 renamed IMG_20210102_030405.jpg -> IMG_20210102_030405.png
+
+📋 summary
+   directories scanned:      1
+   media files found:         3
+   updated directly:          3
+   XMP sidecars written:      0
+   already correct:           0
+   skipped without sidecar:   1
+   failed:                    0
+   fs modification times set: 3
+   fs creation times set:     0
+   fs creation unsupported:   3
+   date source filename-date-time:      1 file(s)
+   date source json-photoTakenTime:     2 file(s)
+   warnings:                  0
+   errors:                    0
+result: completed
+```
+
+(`fs creation unsupported` on Linux means exactly that — filesystem limitation, not an error.)
+
+### Step 4 — re-run proves idempotency
+
+```bash
+./gophix fix --timezone Europe/Berlin "$HOME/gophix-demo/Takeout/Google Fotos"
+```
+
+```text
+   updated directly:          0
+   XMP sidecars written:      0
+   already correct:           3
+   skipped without sidecar:   1
+   failed:                    0
+result: completed
+```
+
+### Step 5 — verify independently with ExifTool
+
+```bash
+exiftool -time:all -gps:all -XMP-dc:Description \
+  "$HOME/gophix-demo/Takeout/Google Fotos/IMG_20220814_153000.jpg"
+```
+
+```text
+File Modification Date/Time     : 2022:08:14 16:10:00+02:00
+Modify Date                     : 2022:08:14 16:10:00
+Date/Time Original              : 2022:08:14 16:10:00
+Create Date                     : 2022:08:14 16:10:00
+Offset Time                     : +02:00
+Offset Time Original            : +02:00
+Offset Time Digitized           : +02:00
+GPS Time Stamp                  : 14:10:00
+GPS Date Stamp                  : 2022:08:14
+GPS Latitude Ref                : North
+GPS Longitude Ref               : East
+GPS Altitude Ref                : Above Sea Level
+Description                     : Kolosseum in Rom
+```
+
+Local time 16:10+02:00 (= 14:10 UTC, the JSON instant), GPS stamps UTC — exactly the documented
+policy. The filename-repaired PNG carries `2021:01:02 03:04:05` with `+01:00`.
+
+### Step 6 — organize by year (copies; sources stay untouched)
+
+```bash
+./gophix organize-by-year "$HOME/gophix-demo/Takeout" "$HOME/gophix-demo/Organized"
+find "$HOME/gophix-demo/Organized" -type f | sort
+```
+
+```text
+📋 summary
+   date source embedded-DateTimeOriginal: 3 file(s)
+   date source json-photoTakenTime:     1 file(s)
+   copied:                    4
+   moved:                     0
+   already present (skipped): 0
+   collisions resolved:       0
+   placed in Unknown/:        0
+result: completed
+
+gophix-demo/Organized/2019/IMG_20190301_104500.jpg
+gophix-demo/Organized/2021/IMG_20210102_030405.png
+gophix-demo/Organized/2022/IMG_20220814_153000.jpg
+gophix-demo/Organized/2022/P1010001.jpg
+```
+
+### Step 7 — clean up sidecars of repaired media only
+
+```bash
+./gophix clean-json --dry-run "$HOME/gophix-demo/Takeout"   # inspect first
+./gophix clean-json --yes "$HOME/gophix-demo/Takeout"       # then delete
+find "$HOME/gophix-demo/Takeout" -name "*.json"             # what remains:
+```
+
+```text
+matched & verified JSON sidecars:
+   ~/gophix-demo/Takeout/Google Fotos/IMG_20190301_104500.json  (media: IMG_20190301_104500.jpg)
+   ~/gophix-demo/Takeout/Google Fotos/IMG_20220814_153000.jpg.supplemental-metadata.json  (media: IMG_20220814_153000.jpg)
+
+[dry-run] would delete 2 file(s)
+
+# after --yes, still present (deliberately):
+gophix-demo/Takeout/Album Italien 2022/P1010001.jpg.supplemental-metadata.json   ← that media was never fixed
+gophix-demo/Takeout/Google Fotos/Metadaten.json                                  ← generic album metadata
+```
+
+Without `--yes`, `clean-json` asks for confirmation interactively (`Really delete these N files? [y/N]`).
+
 ## Usage
 
 ```
@@ -109,12 +302,90 @@ gophix fix [options] <takeout-media-root>
 gophix clean-json [options] <takeout-media-root>
 gophix organize-by-year [options] <source-path> <destination-path>
 gophix find-duplicates [options] <takeout-media-root>
+gophix help | version
 ```
 
-Common options: `--dry-run`, `--verbose`, `--timezone <IANA-zone|+HH:MM>`, `--force-json-time`,
-`--time-policy preserve-existing|prefer-json|json-only` (default `preserve-existing`),
-`--no-filename-fallback`, `--assume-noon-for-date-only`; organize adds `--move`, `--include-unknown-date`,
-`--keep-json`, `--layout`; clean-json adds `--yes`; find-duplicates adds `--format`, `--output`.
+### `fix` — every option in use
+
+```bash
+# recommended default: dry-run first, verbose to see decisions
+./gophix fix --dry-run --verbose --timezone Europe/Berlin "/data/Takeout/Google Fotos"
+
+# real run (same flags minus --dry-run)
+./gophix fix --timezone Europe/Berlin "/data/Takeout/Google Fotos"
+
+# fixed offset instead of IANA zone
+./gophix fix --timezone "+01:00" "/data/Takeout/Google Fotos"
+
+# overwrite valid embedded capture times with the JSON time (opt-in)
+./gophix fix --force-json-time --timezone Europe/Berlin "/data/Takeout/Google Fotos"
+
+# JSON always wins over embedded times (policy variant)
+./gophix fix --time-policy prefer-json --timezone Europe/Berlin "/data/Takeout"
+./gophix fix --time-policy json-only  --timezone Europe/Berlin "/data/Takeout"   # no JSON time = no date
+
+# never derive dates from filenames (strictest mode)
+./gophix fix --no-filename-fallback --timezone Europe/Berlin "/data/Takeout/Google Fotos"
+
+# date-only filenames like 2019-03-01.jpg get 12:00:00 (default: off, year-only usage)
+./gophix fix --assume-noon-for-date-only --timezone Europe/Berlin "/data/Takeout"
+
+# limit parallel ExifTool workers (default: CPU count, max 8; env GOPHIX_JOBS also works)
+./gophix fix --jobs 4 --timezone Europe/Berlin "/data/Takeout/Google Fotos"
+```
+
+Flag interactions: `--force-json-time` implies JSON-over-embedded for files that have a JSON
+timestamp; `--time-policy json-only` also disables the filename fallback implicitly.
+
+### `clean-json` — every option in use
+
+```bash
+./gophix clean-json --dry-run "/data/Takeout"          # list what would be deleted; deletes nothing
+./gophix clean-json "/data/Takeout"                    # interactive: 'Really delete … ? [y/N]'
+./gophix clean-json --yes "/data/Takeout"              # non-interactive (scripts)
+./gophix clean-json --yes --verbose "/data/Takeout"    # additionally print why files are KEPT
+```
+
+Only sidecars whose media verifies fully correct (dates, GPS, description, FileModifyDate) are ever
+deleted — run it **after** `fix`. Generic/unmatched/unfixable JSON always survives.
+
+### `organize-by-year` — every option in use
+
+```bash
+# plan first (never writes/moves/deletes anything)
+./gophix organize-by-year --dry-run "/data/Takeout/Google Fotos" "/data/Organized"
+
+# default layout yyyy/, copy mode (sources untouched)
+./gophix organize-by-year "/data/Takeout/Google Fotos" "/data/Organized"
+
+# month folders, e.g. 2020/12/file.jpg
+./gophix organize-by-year --layout yyyy/mm "/data/Takeout" "/data/Organized"
+
+# one folder per month: 2020-12/
+./gophix organize-by-year --layout yyyy-mm "/data/Takeout" "/data/Organized"
+
+# everything directly in /data/Organized (collision-safe names when needed)
+./gophix organize-by-year --layout flat "/data/Takeout" "/data/Organized"
+
+# move instead of copy (opt-in; sources removed only after byte-verified copy)
+./gophix organize-by-year --move "/data/Takeout/Google Fotos" "/data/Organized"
+
+# include undated media under Unknown/ (otherwise they are skipped & reported)
+./gophix organize-by-year --include-unknown-date "/data/Takeout" "/data/Organized"
+
+# also copy matched JSON sidecars next to the media
+./gophix organize-by-year --keep-json "/data/Takeout" "/data/Organized"
+
+# verbose per-file decisions incl. collision notices
+./gophix organize-by-year --verbose "/data/Takeout" "/data/Organized"
+```
+
+Flags combine freely, e.g. plan a move with unknowns included:
+
+```bash
+./gophix organize-by-year --dry-run --move --include-unknown-date \
+  "/data/Takeout" "/data/Organized"
+```
 
 ### organize-by-year: folder layouts
 
@@ -142,46 +413,53 @@ report only, nothing is ever deleted or modified.
 ```bash
 ./gophix find-duplicates "/data/Takeout"                    # human-readable report to stdout
 ./gophix find-duplicates --output dupes.csv "/data/Takeout" # format inferred from extension
-./gophix find-duplicates --format json --output - "/data/Takeout"
+./gophix find-duplicates --output dupes.json --format json "/data/Takeout"
+./gophix find-duplicates --format json --output - "/data/Takeout"   # JSON to stdout
 ```
+
+Sample text report (from the walkthrough above):
+
+```text
+── family 1/1 · sha256 38212e… · 2 copies · 642 B each
+ ★ KEEP ~/gophix-demo/Takeout/Album Italien 2022/P1010001.jpg (sidecar, taken 2022-08-14)
+        ~/gophix-demo/Takeout/Google Fotos/IMG_20220814_153000.jpg (sidecar, taken 2022-08-14)
+```
+
+CSV columns: `hash,path,bytes,is_keep,has_sidecar,capture_date` — exactly one row per copy carries
+`is_keep,true`.
 
 - Hashing runs only on files whose byte size collides with another file (most of a large library is
   skipped). Requires no ExifTool.
 - Each family lists all copies with a ★ keep suggestion (copy with sidecar first, then shorter path).
 - Exit code stays `0` when duplicates are found; `1` only for processing errors (unreadable files).
 
-Suggested workflow: `fix` → `find-duplicates` → `organize-by-year`, so redundant copies are known
-before organizing.
+Recommended order: **find-duplicates → fix → organize-by-year**. Dedupe first while Google's copies
+are still byte-identical; after `fix`, repaired files differ from their unfixed album copies and can
+no longer be matched by content hashing.
 
-Safe examples (Linux):
-
-```bash
-./gophix fix --dry-run --verbose --timezone Europe/Berlin "/data/Takeout/Google Fotos"
-
-./gophix fix --timezone Europe/Berlin "/data/Takeout/Google Fotos"
-
-./gophix organize-by-year --dry-run \
-  "/data/Takeout/Google Fotos" \
-  "/data/GooglePhotos-Organized"
-
-./gophix organize-by-year --layout yyyy/mm \
-  "/data/Takeout/Google Fotos" \
-  "/data/GooglePhotos-Organized"
-
-./gophix clean-json --dry-run "/data/Takeout/Google Fotos"
-```
-
-Windows PowerShell examples:
+### Windows PowerShell examples
 
 ```powershell
-.\gophix.exe fix --dry-run 'D:\Takeout\Google Fotos'
+.\gophix.exe fix --dry-run --verbose --timezone Europe/Berlin 'D:\Takeout\Google Fotos'
 
-.\gophix.exe organize-by-year `
+.\gophix.exe fix --timezone Europe/Berlin 'D:\Takeout\Google Fotos'
+
+.\gophix.exe organize-by-year --layout yyyy/mm `
   'D:\Takeout\Google Fotos' `
   'D:\GooglePhotos-Organized'
+
+.\gophix.exe organize-by-year --move --include-unknown-date `
+  'D:\Takeout\Google Fotos' `
+  'D:\GooglePhotos-Organized'
+
+.\gophix.exe clean-json --dry-run 'D:\Takeout'
+.\gophix.exe clean-json --yes 'D:\Takeout'
+
+.\gophix.exe find-duplicates --output D:\dupes.csv 'D:\Takeout'
 ```
 
-Exit codes: `0` success · `1` processing errors · `2` usage error · `3` ExifTool missing.
+Exit codes: `0` success · `1` processing errors · `2` usage error · `3` ExifTool missing
+(`find-duplicates` never needs ExifTool and cannot produce `3`).
 
 ## Performance
 
